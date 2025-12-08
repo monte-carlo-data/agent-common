@@ -34,6 +34,7 @@ from apollo.egress.agent.service.storage_service import StorageService
 from apollo.common.agent.constants import (
     ATTRIBUTE_NAME_RESULT,
     ATTRIBUTE_NAME_TRACE_ID,
+    ATTRIBUTE_NAME_ERROR,
 )
 from apollo.common.agent.serde import (
     decode_dictionary,
@@ -309,9 +310,7 @@ class BaseEgressAgentService(ABC):
             health_information = self.health_information(trace_id=trace_id)
             self._schedule_push_results(operation_id, health_information)
         except Exception as ex:
-            self._schedule_push_results(
-                operation_id, ResultUtils.result_for_exception(ex)
-            )
+            self._schedule_push_results(operation_id, self._result_for_exception(ex))
 
     def _schedule_operation(self, operation_id: str, event: Dict[str, Any]):
         self._ops_runner.schedule(Operation(operation_id, event))
@@ -346,9 +345,7 @@ class BaseEgressAgentService(ABC):
                 },
             )
         except Exception as ex:
-            self._schedule_push_results(
-                operation_id, ResultUtils.result_for_exception(ex)
-            )
+            self._schedule_push_results(operation_id, self._result_for_exception(ex))
 
     def _execute_get_metrics(self, operation_id: str, event: Dict[str, Any]):
         operation = event.get(_ATTR_NAME_OPERATION, {})
@@ -362,9 +359,7 @@ class BaseEgressAgentService(ABC):
                 },
             )
         except Exception as ex:
-            self._schedule_push_results(
-                operation_id, ResultUtils.result_for_exception(ex)
-            )
+            self._schedule_push_results(operation_id, self._result_for_exception(ex))
 
     def _push_metrics(self):
         self._schedule_operation(
@@ -415,9 +410,7 @@ class BaseEgressAgentService(ABC):
                 },
             )
         except Exception as ex:
-            self._schedule_push_results(
-                operation_id, ResultUtils.result_for_exception(ex)
-            )
+            self._schedule_push_results(operation_id, self._result_for_exception(ex))
 
     @classmethod
     def _get_query_from_event(
@@ -503,3 +496,9 @@ class BaseEgressAgentService(ABC):
                 result[ATTRIBUTE_NAME_TRACE_ID] = operation_attrs.trace_id
             result = self._results_processor.process_result(result, operation_attrs)
         BackendClient.push_results(operation_id, result)
+
+    def _result_for_exception(self, ex: Exception) -> Dict:
+        result: Dict[str, Any] = {
+            ATTRIBUTE_NAME_ERROR: str(ex) or f"Unknown error: {type(ex).__name__}",
+        }
+        return result

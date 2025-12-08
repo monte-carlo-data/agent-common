@@ -1,0 +1,7 @@
+#agent-base @ git+https://github.com/monte-carlo-data/agent-base.git@mrostan/yet-184-agent-refactoring-common
+agent-base @ git+ssh://git@github.com/monte-carlo-data/agent-base.git@mrostan/yet-184-agent-refactoring-common
+
+requests>=2.32.4 # Upgraded in VULN-616
+retry2==0.9.5
+sseclient==0.0.27
+urllib3==2.5.0 # Upgraded in VULN-621

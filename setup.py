@@ -19,9 +19,9 @@ def get_long_description():
 
 
 setup(
-    name="mcd-agent",
+    name="agent-common",
     use_scm_version=True,
-    license="https://github.com/monte-carlo-data/agent-common/blob/main/LICENSE.md",
+    license="https://github.com/monte-carlo-data/agent-common/blob/main/LICENSE",
     description="Monte Carlo's Agent - Common",
     long_description=get_long_description(),
     long_description_content_type="text/markdown",

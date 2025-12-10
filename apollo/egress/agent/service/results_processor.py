@@ -8,7 +8,7 @@ from apollo.egress.agent.config.config_keys import (
 )
 from apollo.egress.agent.config.config_manager import ConfigurationManager
 from apollo.egress.agent.service.operation_result import OperationAttributes
-from apollo.egress.agent.service.storage_service import StorageService
+from apollo.egress.agent.service.storage_service import BaseStorageService
 from apollo.common.agent.constants import ATTRIBUTE_NAME_RESULT
 from apollo.common.agent.serde import AgentSerializer
 
@@ -26,9 +26,15 @@ class ResultsProcessor:
     on the settings received in the operation attributes.
     """
 
-    def __init__(self, config_manager: ConfigurationManager, storage: StorageService):
+    def __init__(
+        self,
+        config_manager: ConfigurationManager,
+        storage: BaseStorageService,
+        enable_pre_signed_urls: bool = False,
+    ):
         self._storage = storage
         self._config_manager = config_manager
+        self._enable_pre_signed_urls = enable_pre_signed_urls
 
     def process_result(
         self, result: Dict[str, Any], operation_attrs: OperationAttributes
@@ -62,11 +68,13 @@ class ResultsProcessor:
             )
         return result
 
-    @staticmethod
     def _must_use_pre_signed_url(
-        operation_attrs: OperationAttributes, size: int
+        self, operation_attrs: OperationAttributes, size: int
     ) -> bool:
-        return 0 < operation_attrs.response_size_limit_bytes < size
+        return (
+            self._enable_pre_signed_urls
+            and 0 < operation_attrs.response_size_limit_bytes < size
+        )
 
     @classmethod
     def _calculate_result_size(cls, result: Dict[str, Any]) -> int:

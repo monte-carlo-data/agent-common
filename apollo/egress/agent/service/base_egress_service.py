@@ -30,7 +30,7 @@ from apollo.egress.agent.service.operations_runner import Operation, OperationsR
 from apollo.egress.agent.service.results_processor import ResultsProcessor
 from apollo.egress.agent.service.results_publisher import ResultsPublisher
 from apollo.egress.agent.service.timer_service import TimerService
-from apollo.egress.agent.service.storage_service import StorageService
+from apollo.egress.agent.service.storage_service import BaseStorageService
 from apollo.common.agent.constants import (
     ATTRIBUTE_NAME_RESULT,
     ATTRIBUTE_NAME_TRACE_ID,
@@ -120,7 +120,7 @@ class BaseEgressAgentService(ABC):
         service_name: str,
         config_manager: ConfigurationManager,
         logs_service: LogsService,
-        storage_service: StorageService,
+        storage_service: BaseStorageService,
         ops_runner: Optional[OperationsRunner] = None,
         results_publisher: Optional[ResultsPublisher] = None,
         events_client: Optional[EventsClient] = None,

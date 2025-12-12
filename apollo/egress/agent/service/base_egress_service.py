@@ -39,7 +39,6 @@ from apollo.common.agent.constants import (
 from apollo.common.agent.serde import (
     decode_dictionary,
 )
-from apollo.common.agent.settings import VERSION, BUILD_NUMBER
 from apollo.egress.agent.utils import utils
 from apollo.egress.agent.utils.result_utils import ResultUtils
 from apollo.egress.agent.utils.utils import (
@@ -208,7 +207,7 @@ class BaseEgressAgentService(ABC):
         self._logs_sender.start(handler=self._push_logs)
 
         logger.info(
-            f"{self._service_name} Service Started: v{VERSION} (build #{BUILD_NUMBER})"
+            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()})"
         )
 
     def stop(self):
@@ -245,6 +244,14 @@ class BaseEgressAgentService(ABC):
         self._schedule_push_results_for_query(
             operation_id, query_id, operation_attributes
         )
+
+    @abstractmethod
+    def _get_version(self) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _get_build_number(self) -> str:
+        raise NotImplementedError
 
     def _event_handler(self, event: Dict[str, Any]):
         """

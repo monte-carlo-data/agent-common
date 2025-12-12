@@ -65,6 +65,8 @@ _ATTR_NAME_CONFIG = "config"
 _ATTR_NAME_ENV = "env"
 _ATTR_NAME_KEY_ID = "authentication_key_id"
 _ATTR_NAME_JOB_TYPE = "job_type"
+_ATTR_NAME_VERSION = "version"
+_ATTR_NAME_BUILD = "build"
 
 _ATTR_NAME_SIZE_EXCEEDED = "__mcd_size_exceeded__"
 
@@ -219,6 +221,8 @@ class BaseEgressAgentService(ABC):
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(self._platform, trace_id)
+        health_info[_ATTR_NAME_VERSION] = self._get_version()
+        health_info[_ATTR_NAME_BUILD] = self._get_build_number()
         health_info[_ATTR_NAME_PARAMETERS] = self._config_manager.get_all_values()
         # update env to include the same env var other agent platforms use to report if they are remote upgradable
         health_info[_ATTR_NAME_ENV][_ENV_NAME_IS_REMOTE_UPGRADABLE] = (

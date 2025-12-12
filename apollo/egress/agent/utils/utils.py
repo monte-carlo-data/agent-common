@@ -8,8 +8,6 @@ from typing import Dict, Optional, Any
 
 from urllib3.connection import HTTPConnection
 
-from apollo.common.agent.settings import VERSION, BUILD_NUMBER
-
 BACKEND_SERVICE_URL = os.getenv(
     "BACKEND_SERVICE_URL",
     "https://artemis.getmontecarlo.com:443",
@@ -95,8 +93,6 @@ def enable_tcp_keep_alive():
 def health_information(platform: str, trace_id: Optional[str] = None) -> Dict[str, Any]:
     health_info = {
         "platform": platform,
-        "version": VERSION,
-        "build": BUILD_NUMBER,
         "env": _env_dictionary(),
     }
     if trace_id:

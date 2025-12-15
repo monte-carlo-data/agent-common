@@ -11,8 +11,6 @@ CONFIG_PUBLISHER_THREAD_COUNT = "PUBLISHER_THREAD_COUNT"
 # how to run queries, by default we run them asynchronously, set this to `true` to run them synchronously
 # you should update the size of the connection pool and the number of query runners accordingly
 CONFIG_USE_SYNC_QUERIES = "USE_SYNC_QUERIES"
-# name of the stage to use to store files
-CONFIG_STAGE_NAME = "STAGE_NAME"
 # expiration seconds for pre-signed urls used for responses
 CONFIG_PRE_SIGNED_URL_RESPONSE_EXPIRATION_SECONDS = (
     "PRE_SIGNED_URL_RESPONSE_EXPIRATION_SECONDS"

@@ -1,39 +1,21 @@
-import json
 import logging
 import os
-import socket
 import sys
-from json import JSONDecodeError
-from typing import Dict, Optional, Any
-
-from urllib3.connection import HTTPConnection
+from typing import Dict, Optional, Any, List
 
 BACKEND_SERVICE_URL = os.getenv(
     "BACKEND_SERVICE_URL",
     "https://artemis.getmontecarlo.com:443",
 )
-LOCAL = os.getenv("SNOWFLAKE_HOST") is None  # not running in Snowpark containers
+LOCAL = os.getenv("LOCAL", "false").lower() == "true"
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 X_MCD_ID = "x-mcd-id"
-_X_MCD_TOKEN = "x-mcd-token"
-_MCD_ID_ATTR = "mcd_id"
-_MCD_TOKEN_ATTR = "mcd_token"
-_LOCAL_TOKEN_ID = os.getenv("LOCAL_TOKEN_ID", "local-token-id")
-_LOCAL_TOKEN_SECRET = os.getenv("LOCAL_TOKEN_SECRET", "local-token-secret")
-_NO_TOKEN_ID = "no-token-id"
-_NO_TOKEN_SECRET = "no-token-secret"
-
-_SECRET_STRING_PATH = "/usr/local/creds/secret_string"
-_SNOWFLAKE_TOKEN_PATH = "/snowflake/session/token"
+X_MCD_TOKEN = "x-mcd-token"
 
 _HEALTH_ENV_VARS = [
     "PYTHON_VERSION",
     "SERVER_SOFTWARE",
-    "SNOWFLAKE_ACCOUNT",
-    "SNOWFLAKE_DATABASE",
-    "SNOWFLAKE_HOST",
-    "SNOWFLAKE_SERVICE_NAME",
 ]
 
 logger = logging.getLogger(__name__)
@@ -49,77 +31,31 @@ def init_logging():
     logging.getLogger("snowflake.connector.cursor").setLevel(logging.WARNING)
 
 
-def get_mc_login_token() -> Dict[str, str]:
-    if LOCAL:
-        return {
-            X_MCD_ID: _LOCAL_TOKEN_ID,
-            _X_MCD_TOKEN: _LOCAL_TOKEN_SECRET,
-        }
-    if os.path.exists(_SECRET_STRING_PATH):
-        with open(_SECRET_STRING_PATH, "r") as f:
-            key_str = f.read()
-        try:
-            key_json = json.loads(key_str)
-            if _MCD_ID_ATTR in key_json and _MCD_TOKEN_ATTR in key_json:
-                return {
-                    X_MCD_ID: key_json[_MCD_ID_ATTR],
-                    _X_MCD_TOKEN: key_json[_MCD_TOKEN_ATTR],
-                }
-            else:
-                logger.warning(f"Invalid secret string, keys: {key_json.keys()}")
-        except JSONDecodeError as ex:
-            logger.error(f"Failed to parse Key JSON: {ex}")
-    else:
-        logger.warning("No token file found")
-
-    return {
-        X_MCD_ID: _NO_TOKEN_ID,
-        _X_MCD_TOKEN: _NO_TOKEN_SECRET,
-    }
-
-
-def get_sf_login_token():
-    with open(_SNOWFLAKE_TOKEN_PATH, "r") as f:
-        return f.read()
-
-
-def enable_tcp_keep_alive():
-    HTTPConnection.default_socket_options = HTTPConnection.default_socket_options + [  # type: ignore
-        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-    ]
-    logger.info("TCP Keep-alive enabled")
-
-
-def health_information(platform: str, trace_id: Optional[str] = None) -> Dict[str, Any]:
+def health_information(
+    platform: str,
+    trace_id: Optional[str] = None,
+    additional_env_vars: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     health_info = {
         "platform": platform,
-        "env": _env_dictionary(),
+        "env": _env_dictionary(additional_env_vars),
     }
     if trace_id:
         health_info["trace_id"] = trace_id
     return health_info
 
 
-def get_application_name():
-    # in Snowpark, the application name matches the current database name
-    # for local execution, we use MCD_AGENT
-    return os.getenv("SNOWFLAKE_DATABASE", "MCD_AGENT")
-
-
-def get_query_for_logs(query: str) -> str:
-    return query[:500].replace("\n", " ")  # limit to 500 chars and remove new lines
-
-
-def _env_dictionary() -> Dict:
+def _env_dictionary(additional_env_vars: Optional[List[str]] = None) -> Dict:
     env: Dict[str, Optional[str]] = {
         "PYTHON_SYS_VERSION": sys.version,
         "CPU_COUNT": str(os.cpu_count()),
     }
+    env_vars = (
+        _HEALTH_ENV_VARS + additional_env_vars
+        if additional_env_vars
+        else _HEALTH_ENV_VARS
+    )
     env.update(
-        {
-            env_var: os.getenv(env_var)
-            for env_var in _HEALTH_ENV_VARS
-            if os.getenv(env_var)
-        }
+        {env_var: os.getenv(env_var) for env_var in env_vars if os.getenv(env_var)}
     )
     return env

@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import sys
 from typing import Dict, Optional, Any, List
 
@@ -29,6 +30,13 @@ def init_logging():
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
     logging.getLogger("snowflake.connector.cursor").setLevel(logging.WARNING)
+
+
+def enable_tcp_keep_alive():
+    HTTPConnection.default_socket_options = HTTPConnection.default_socket_options + [  # type: ignore
+        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    ]
+    logger.info("TCP Keep-alive enabled")
 
 
 def health_information(

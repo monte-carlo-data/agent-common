@@ -9,7 +9,6 @@ from retry import retry
 from apollo.common.agent.serde import AgentSerializer
 
 from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
-from apollo.egress.agent.utils.utils import BACKEND_SERVICE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,12 @@ class BackendClient:
     Client used to interact with the MC Backend (Orchestrator) service.
     """
 
-    def __init__(self, login_token_provider: LoginTokenProvider) -> None:
+    def __init__(
+        self,
+        backend_service_url: str,
+        login_token_provider: LoginTokenProvider,
+    ) -> None:
+        self._backend_service_url = backend_service_url
         self._login_token_provider = login_token_provider
 
     def push_results(self, operation_id: str, result: Dict[str, Any]):
@@ -36,7 +40,7 @@ class BackendClient:
     def _push_results_with_retries(self, operation_id: str, result: Dict[str, Any]):
         logger.info(f"Sending query results to backend, operation_id: {operation_id}")
         results_url = urljoin(
-            BACKEND_SERVICE_URL, f"/api/v1/agent/operations/{operation_id}/result"
+            self._backend_service_url, f"/api/v1/agent/operations/{operation_id}/result"
         )
         result_str = json.dumps(
             {
@@ -70,7 +74,7 @@ class BackendClient:
         Performs an operation on the backend service. For example `ping`.
         """
         try:
-            url = urljoin(BACKEND_SERVICE_URL, path)
+            url = urljoin(self._backend_service_url, path)
             headers = self._login_token_provider.get_token()
             if body:
                 headers["Content-Type"] = "application/json"

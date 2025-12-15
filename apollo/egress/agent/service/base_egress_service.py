@@ -42,10 +42,7 @@ from apollo.common.agent.serde import (
 )
 from apollo.egress.agent.utils import utils
 from apollo.egress.agent.utils.result_utils import ResultUtils
-from apollo.egress.agent.utils.utils import (
-    BACKEND_SERVICE_URL,
-    X_MCD_ID,
-)
+from apollo.egress.agent.utils.utils import X_MCD_ID
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +103,7 @@ class BaseEgressAgentService(ABC):
 
     def __init__(
         self,
+        backend_service_url: str,
         platform: str,
         service_name: str,
         config_manager: ConfigurationManager,
@@ -158,11 +156,12 @@ class BaseEgressAgentService(ABC):
 
         self._events_client = events_client or EventsClient(
             receiver=SSEClientReceiver(
-                base_url=BACKEND_SERVICE_URL,
+                base_url=backend_service_url,
                 login_token_provider=self._login_token_provider,
             ),
         )
         self._backend_client = BackendClient(
+            backend_service_url=backend_service_url,
             login_token_provider=self._login_token_provider,
         )
         self._operations_mapping = [

@@ -2,6 +2,7 @@ import logging
 import os
 import socket
 import sys
+from urllib3.connection import HTTPConnection
 from typing import Dict, Optional, Any, List
 
 BACKEND_SERVICE_URL = os.getenv(

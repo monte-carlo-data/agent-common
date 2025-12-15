@@ -9,7 +9,8 @@ import sseclient
 from retry import retry
 
 from apollo.egress.agent.events.base_receiver import BaseReceiver
-from apollo.egress.agent.utils.utils import get_mc_login_token, X_MCD_ID
+from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
+from apollo.egress.agent.utils.utils import X_MCD_ID
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +28,11 @@ class SSEClientReceiver(BaseReceiver):
     def __init__(
         self,
         base_url: str,
+        login_token_provider: LoginTokenProvider,
     ):
         self._current_loop_id: Optional[str] = None
         self._base_url = base_url
+        self._login_token_provider = login_token_provider
         self._sse_client: Optional[sseclient.SSEClient] = None
         self._event_handler: Optional[Callable[[Dict], None]] = None
         self._connected_handler: Optional[Callable[[], None]] = None
@@ -77,7 +80,7 @@ class SSEClientReceiver(BaseReceiver):
     )
     def _connect_and_consume_events(self, loop_id: str):
         try:
-            mc_login_token = get_mc_login_token()
+            mc_login_token = self._login_token_provider.get_token()
             token_id = mc_login_token.get(X_MCD_ID)
             logger.info(f"Connecting SSE Client, using token ID={token_id} ...")
             url = urljoin(self._base_url, f"/stream")

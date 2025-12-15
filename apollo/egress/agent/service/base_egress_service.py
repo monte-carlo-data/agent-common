@@ -3,7 +3,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Tuple, Optional, Any, Callable
+from typing import Dict, Tuple, Optional, Any, Callable, List
 
 from apollo.egress.agent.backend.backend_client import BackendClient
 from apollo.egress.agent.events.ack_sender import (
@@ -20,8 +20,9 @@ from apollo.egress.agent.config.config_keys import (
     CONFIG_ACK_INTERVAL_SECONDS,
     CONFIG_PUSH_LOGS_INTERVAL_SECONDS,
 )
-from apollo.egress.agent.service.logs_service import LogsService
-from apollo.egress.agent.service.metrics_service import MetricsService
+from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
+from apollo.egress.agent.service.logs_service import BaseLogsService
+from apollo.egress.agent.service.metrics_service import BaseMetricsService
 from apollo.egress.agent.service.operation_result import (
     AgentOperationResult,
     OperationAttributes,
@@ -43,43 +44,35 @@ from apollo.egress.agent.utils import utils
 from apollo.egress.agent.utils.result_utils import ResultUtils
 from apollo.egress.agent.utils.utils import (
     BACKEND_SERVICE_URL,
-    get_mc_login_token,
     X_MCD_ID,
 )
 
 logger = logging.getLogger(__name__)
 
-_ATTR_NAME_OPERATION = "operation"
-_ATTR_NAME_OPERATION_ID = "operation_id"
-_ATTR_NAME_OPERATION_TYPE = "type"
-_ATTR_NAME_PATH = "path"
-_ATTR_NAME_TRACE_ID = "trace_id"
-_ATTR_NAME_LIMIT = "limit"
-_ATTR_NAME_QUERY = "query"
-_ATTR_NAME_TIMEOUT = "timeout"
-_ATTR_NAME_COMPRESS_RESPONSE_FILE = "compress_response_file"
-_ATTR_NAME_RESPONSE_SIZE_LIMIT_BYTES = "response_size_limit_bytes"
-_ATTR_NAME_EVENTS = "events"
-_ATTR_NAME_PARAMETERS = "parameters"
-_ATTR_NAME_CONFIG = "config"
-_ATTR_NAME_ENV = "env"
-_ATTR_NAME_KEY_ID = "authentication_key_id"
-_ATTR_NAME_JOB_TYPE = "job_type"
-_ATTR_NAME_VERSION = "version"
-_ATTR_NAME_BUILD = "build"
+ATTR_NAME_OPERATION = "operation"
+ATTR_NAME_OPERATION_ID = "operation_id"
+ATTR_NAME_OPERATION_TYPE = "type"
+ATTR_NAME_PATH = "path"
+ATTR_NAME_TRACE_ID = "trace_id"
+ATTR_NAME_LIMIT = "limit"
+ATTR_NAME_QUERY = "query"
+ATTR_NAME_TIMEOUT = "timeout"
+ATTR_NAME_COMPRESS_RESPONSE_FILE = "compress_response_file"
+ATTR_NAME_RESPONSE_SIZE_LIMIT_BYTES = "response_size_limit_bytes"
+ATTR_NAME_EVENTS = "events"
+ATTR_NAME_PARAMETERS = "parameters"
+ATTR_NAME_CONFIG = "config"
+ATTR_NAME_ENV = "env"
+ATTR_NAME_KEY_ID = "authentication_key_id"
+ATTR_NAME_JOB_TYPE = "job_type"
+ATTR_NAME_VERSION = "version"
+ATTR_NAME_BUILD = "build"
 
 _ATTR_NAME_SIZE_EXCEEDED = "__mcd_size_exceeded__"
 
-_ATTR_OPERATION_TYPE_SNOWFLAKE_QUERY = "snowflake_query"
-_ATTR_OPERATION_TYPE_SNOWFLAKE_TEST = "snowflake_connection_test"
 _ATTR_OPERATION_TYPE_PUSH_METRICS = "push_metrics"
 _PATH_PUSH_METRICS = "push_metrics"
 _PATH_PUSH_LOGS = "push_logs"
-
-_DEFAULT_COMPRESS_RESPONSE_FILE = True
-_DEFAULT_RESPONSE_SIZE_LIMIT_BYTES = (
-    20000000  # 20Mb, the same default value we have on the DC side for Snowflake agents
-)
 
 _ENV_NAME_IS_REMOTE_UPGRADABLE = "MCD_AGENT_IS_REMOTE_UPGRADABLE"
 
@@ -95,10 +88,6 @@ class OperationMapping:
     method: Callable[[str, Dict[str, Any]], None]
     schedule: bool = False
     matching_type: OperationMatchingType = OperationMatchingType.EQUALS
-
-
-class EgressAgentError(Exception):
-    pass
 
 
 class BaseEgressAgentService(ABC):
@@ -120,17 +109,23 @@ class BaseEgressAgentService(ABC):
         platform: str,
         service_name: str,
         config_manager: ConfigurationManager,
-        logs_service: LogsService,
+        logs_service: BaseLogsService,
+        metrics_service: BaseMetricsService,
         storage_service: BaseStorageService,
+        login_token_provider: LoginTokenProvider,
         ops_runner: Optional[OperationsRunner] = None,
         results_publisher: Optional[ResultsPublisher] = None,
         events_client: Optional[EventsClient] = None,
         ack_sender: Optional[AckSender] = None,
         logs_sender: Optional[TimerService] = None,
+        additional_env_vars: Optional[List[str]] = None,
+        enable_pre_signed_urls: bool = False,
     ):
         self._platform = platform
         self._service_name = service_name
+        self._additional_env_vars = additional_env_vars
         self._config_manager = config_manager
+        self._login_token_provider = login_token_provider
         self._ops_runner = ops_runner or OperationsRunner(
             handler=self._execute_scheduled_operation,
             thread_count=config_manager.get_int_value(
@@ -147,6 +142,7 @@ class BaseEgressAgentService(ABC):
             )
         )
         self._logs_service = logs_service
+        self._metrics_service = metrics_service
         self._logs_sender = logs_sender or TimerService(
             name="Logs sender",
             interval_seconds=config_manager.get_int_value(
@@ -157,10 +153,17 @@ class BaseEgressAgentService(ABC):
         self._results_processor = ResultsProcessor(
             config_manager=self._config_manager,
             storage=self._storage,
+            enable_pre_signed_urls=enable_pre_signed_urls,
         )
 
         self._events_client = events_client or EventsClient(
-            receiver=SSEClientReceiver(base_url=BACKEND_SERVICE_URL),
+            receiver=SSEClientReceiver(
+                base_url=BACKEND_SERVICE_URL,
+                login_token_provider=self._login_token_provider,
+            ),
+        )
+        self._backend_client = BackendClient(
+            login_token_provider=self._login_token_provider,
         )
         self._operations_mapping = [
             OperationMapping(
@@ -175,12 +178,12 @@ class BaseEgressAgentService(ABC):
                 schedule=True,
             ),
             OperationMapping(
-                path="/api/v1/snowflake/logs",
+                path="/api/v1/agent/logs",
                 method=self._execute_get_logs,
                 schedule=True,
             ),
             OperationMapping(
-                path="/api/v1/snowflake/metrics",
+                path="/api/v1/agent/metrics",
                 method=self._execute_get_metrics,
                 schedule=True,
             ),
@@ -192,11 +195,6 @@ class BaseEgressAgentService(ABC):
             OperationMapping(
                 path=_PATH_PUSH_LOGS,
                 method=self._execute_push_logs,
-                schedule=True,
-            ),
-            OperationMapping(
-                path="/api/v1/upgrade",
-                method=self._execute_upgrade,
                 schedule=True,
             ),
         ]
@@ -220,33 +218,30 @@ class BaseEgressAgentService(ABC):
         self._logs_sender.stop()
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
-        health_info = utils.health_information(self._platform, trace_id)
-        health_info[_ATTR_NAME_VERSION] = self._get_version()
-        health_info[_ATTR_NAME_BUILD] = self._get_build_number()
-        health_info[_ATTR_NAME_PARAMETERS] = self._config_manager.get_all_values()
+        health_info = utils.health_information(
+            self._platform,
+            trace_id,
+            self._additional_env_vars,
+        )
+        health_info[ATTR_NAME_VERSION] = self._get_version()
+        health_info[ATTR_NAME_BUILD] = self._get_build_number()
+        health_info[ATTR_NAME_PARAMETERS] = self._config_manager.get_all_values()
         # update env to include the same env var other agent platforms use to report if they are remote upgradable
-        health_info[_ATTR_NAME_ENV][_ENV_NAME_IS_REMOTE_UPGRADABLE] = (
+        health_info[ATTR_NAME_ENV][_ENV_NAME_IS_REMOTE_UPGRADABLE] = (
             "true"
             if self._config_manager.get_bool_value(CONFIG_IS_REMOTE_UPGRADABLE, True)
             else "false"
         )
-        health_info[_ATTR_NAME_KEY_ID] = get_mc_login_token().get(X_MCD_ID)
+        health_info[ATTR_NAME_KEY_ID] = self._login_token_provider.get_token().get(
+            X_MCD_ID
+        )
         return health_info
 
     def run_reachability_test(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         trace_id = trace_id or str(uuid.uuid4())
         logger.info(f"Running reachability test, trace_id: {trace_id}")
-        return BackendClient.execute_operation(f"/api/v1/test/ping?trace_id={trace_id}")
-
-    def query_completed(self, operation_json: str, query_id: str):
-        """
-        Invoked by the Snowflake stored procedure when a query execution is completed
-        """
-        operation_attributes = OperationAttributes.from_json(operation_json)
-        operation_id = operation_attributes.operation_id
-        logger.info(f"Query completed: {operation_id}, query_id: {query_id}")
-        self._schedule_push_results_for_query(
-            operation_id, query_id, operation_attributes
+        return self._backend_client.execute_operation(
+            f"/api/v1/test/ping?trace_id={trace_id}"
         )
 
     @abstractmethod
@@ -261,24 +256,26 @@ class BaseEgressAgentService(ABC):
         """
         Invoked by events client when an event is received with an agent operation to run
         """
-        operation_id = event.get(_ATTR_NAME_OPERATION_ID)
+        operation_id = event.get(ATTR_NAME_OPERATION_ID)
         if operation_id:
-            path: str = event.get(_ATTR_NAME_PATH, "")
+            path: str = event.get(ATTR_NAME_PATH, "")
             if path:
                 logger.info(
                     f"Received agent operation: {path}, operation_id: {operation_id}"
                 )
                 self._ack_sender.schedule_ack(operation_id)
                 self._execute_operation(path, operation_id, event)
-        elif op_type := (event.get(_ATTR_NAME_OPERATION_TYPE)):
+        elif op_type := (event.get(ATTR_NAME_OPERATION_TYPE)):
             if op_type == _ATTR_OPERATION_TYPE_PUSH_METRICS:
                 self._push_metrics()
 
     def _execute_operation(self, path: str, operation_id: str, event: Dict[str, Any]):
-        operation = event.get(_ATTR_NAME_OPERATION, {})
+        operation = event.get(ATTR_NAME_OPERATION, {})
         if operation.get(_ATTR_NAME_SIZE_EXCEEDED, False):
             logger.info("Downloading operation from orchestrator")
-            event[_ATTR_NAME_OPERATION] = BackendClient.download_operation(operation_id)
+            event[ATTR_NAME_OPERATION] = self._backend_client.download_operation(
+                operation_id
+            )
 
         method, schedule = self._resolve_operation_method(path)
         if schedule:
@@ -315,8 +312,8 @@ class BaseEgressAgentService(ABC):
 
     def _execute_health(self, operation_id: str, event: Dict[str, Any]):
         try:
-            trace_id = event.get(_ATTR_NAME_OPERATION, {}).get(
-                _ATTR_NAME_TRACE_ID, operation_id
+            trace_id = event.get(ATTR_NAME_OPERATION, {}).get(
+                ATTR_NAME_TRACE_ID, operation_id
             )
             health_information = self.health_information(trace_id=trace_id)
             self._schedule_push_results(operation_id, health_information)
@@ -327,30 +324,30 @@ class BaseEgressAgentService(ABC):
         self._ops_runner.schedule(Operation(operation_id, event))
 
     def _execute_scheduled_operation(self, op: Operation):
-        method, _ = self._resolve_operation_method(op.event.get(_ATTR_NAME_PATH, ""))
+        method, _ = self._resolve_operation_method(op.event.get(ATTR_NAME_PATH, ""))
         if method:
             method(op.operation_id, op.event)
         else:
             logger.error(
-                f"No method mapped to operation path: {op.event.get(_ATTR_NAME_PATH)}"
+                f"No method mapped to operation path: {op.event.get(ATTR_NAME_PATH)}"
             )
             self._schedule_push_results(
                 op.operation_id,
                 ResultUtils.result_for_error_message(
-                    f"Unsupported operation path: {op.event.get(_ATTR_NAME_PATH)}"
+                    f"Unsupported operation path: {op.event.get(ATTR_NAME_PATH)}"
                 ),
             )
 
     def _execute_get_logs(self, operation_id: str, event: Dict[str, Any]):
-        operation = event.get(_ATTR_NAME_OPERATION, {})
-        trace_id = operation.get(_ATTR_NAME_TRACE_ID, operation_id)
-        limit = operation.get(_ATTR_NAME_LIMIT) or 1000
+        operation = event.get(ATTR_NAME_OPERATION, {})
+        trace_id = operation.get(ATTR_NAME_TRACE_ID, operation_id)
+        limit = operation.get(ATTR_NAME_LIMIT) or 1000
         try:
             self._schedule_push_results(
                 operation_id,
                 {
                     ATTRIBUTE_NAME_RESULT: {
-                        _ATTR_NAME_EVENTS: self._logs_service.get_logs(limit),
+                        ATTR_NAME_EVENTS: self._logs_service.get_logs(limit),
                     },
                     ATTRIBUTE_NAME_TRACE_ID: trace_id,
                 },
@@ -359,13 +356,13 @@ class BaseEgressAgentService(ABC):
             self._schedule_push_results(operation_id, self._result_for_exception(ex))
 
     def _execute_get_metrics(self, operation_id: str, event: Dict[str, Any]):
-        operation = event.get(_ATTR_NAME_OPERATION, {})
-        trace_id = operation.get(_ATTR_NAME_TRACE_ID, operation_id)
+        operation = event.get(ATTR_NAME_OPERATION, {})
+        trace_id = operation.get(ATTR_NAME_TRACE_ID, operation_id)
         try:
             self._schedule_push_results(
                 operation_id,
                 {
-                    ATTRIBUTE_NAME_RESULT: MetricsService.fetch_metrics(),
+                    ATTRIBUTE_NAME_RESULT: self._metrics_service.fetch_metrics(),
                     ATTRIBUTE_NAME_TRACE_ID: trace_id,
                 },
             )
@@ -374,100 +371,30 @@ class BaseEgressAgentService(ABC):
 
     def _push_metrics(self):
         self._schedule_operation(
-            _PATH_PUSH_METRICS, {_ATTR_NAME_PATH: _PATH_PUSH_METRICS}
+            _PATH_PUSH_METRICS, {ATTR_NAME_PATH: _PATH_PUSH_METRICS}
         )
 
     def _execute_push_metrics(self, operation_id: str, event: Dict[str, Any]):
         payload = {
             "format": "prometheus",
-            "metrics": MetricsService.fetch_metrics(),
+            "metrics": self._metrics_service.fetch_metrics(),
         }
-        BackendClient.execute_operation("/api/v1/agent/metrics", "POST", payload)
+        self._backend_client.execute_operation("/api/v1/agent/metrics", "POST", payload)
 
     def _push_logs(self):
-        self._schedule_operation(_PATH_PUSH_LOGS, {_ATTR_NAME_PATH: _PATH_PUSH_LOGS})
+        self._schedule_operation(_PATH_PUSH_LOGS, {ATTR_NAME_PATH: _PATH_PUSH_LOGS})
 
     def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
         payload = {
-            "logs": self._logs_service.get_logs(int(event.get(_ATTR_NAME_LIMIT, 1000))),
+            "logs": self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000))),
         }
         logger.info(f"Pushing {len(payload['logs'])} logs")
-        BackendClient.execute_operation("/api/v1/agent/logs", "POST", payload)
-
-    def _execute_upgrade(self, operation_id: str, event: Dict[str, Any]):
-        """
-        Compatible with /api/v1/upgrade operation from other platforms.
-        It updates the configuration if there are parameters under operation and restarts the
-        service.
-        """
-        try:
-            if not self._config_manager.get_bool_value(
-                CONFIG_IS_REMOTE_UPGRADABLE, True
-            ):
-                raise EgressAgentError("Remote upgrades are disabled")
-            operation = event.get(_ATTR_NAME_OPERATION, {})
-            updates = operation.get(_ATTR_NAME_PARAMETERS, {})
-            trace_id = operation.get(_ATTR_NAME_TRACE_ID, operation_id)
-            if updates:
-                self._config_manager.set_values(updates)
-            self._restart_service()
-            BackendClient.push_results(
-                operation_id,
-                {
-                    ATTRIBUTE_NAME_RESULT: {
-                        "updated": True,
-                    },
-                    ATTRIBUTE_NAME_TRACE_ID: trace_id,
-                },
-            )
-        except Exception as ex:
-            self._schedule_push_results(operation_id, self._result_for_exception(ex))
-
-    @classmethod
-    def _get_query_from_event(
-        cls,
-        event: Dict,
-    ) -> Tuple[Optional[str], Optional[int], Optional[OperationAttributes]]:
-        operation = event.get(_ATTR_NAME_OPERATION, {})
-        operation_type = operation.get(_ATTR_NAME_OPERATION_TYPE)
-        operation_id = event.get(_ATTR_NAME_OPERATION_ID)
-        if operation_id and operation_type == _ATTR_OPERATION_TYPE_SNOWFLAKE_QUERY:
-            return (
-                operation.get(_ATTR_NAME_QUERY),
-                operation.get(_ATTR_NAME_TIMEOUT),
-                OperationAttributes(
-                    operation_id=operation_id,
-                    compress_response_file=operation.get(
-                        _ATTR_NAME_COMPRESS_RESPONSE_FILE,
-                        _DEFAULT_COMPRESS_RESPONSE_FILE,
-                    ),
-                    response_size_limit_bytes=operation.get(
-                        _ATTR_NAME_RESPONSE_SIZE_LIMIT_BYTES,
-                        _DEFAULT_RESPONSE_SIZE_LIMIT_BYTES,
-                    ),
-                    job_type=operation.get(_ATTR_NAME_JOB_TYPE),
-                    trace_id=operation.get(_ATTR_NAME_TRACE_ID) or str(uuid.uuid4()),
-                ),
-            )
-        elif operation_type == _ATTR_OPERATION_TYPE_SNOWFLAKE_TEST:
-            return None, None, None
-        else:
-            raise ValueError(f"Invalid operation type: {operation_type}")
+        self._backend_client.execute_operation("/api/v1/agent/logs", "POST", payload)
 
     def _send_ack(self, operation_id: str):
         logger.info(f"Sending ACK for operation={operation_id}")
-        BackendClient.execute_operation(
+        self._backend_client.execute_operation(
             f"/api/v1/agent/operations/{operation_id}/ack", "POST"
-        )
-
-    def _schedule_push_results_for_query(
-        self,
-        operation_id: str,
-        query_id: str,
-        operation_attrs: OperationAttributes,
-    ):
-        self._results_publisher.schedule_push_query_results(
-            operation_id, query_id, operation_attrs
         )
 
     def _schedule_push_results(
@@ -485,7 +412,9 @@ class BaseEgressAgentService(ABC):
     def _push_results(self, result: AgentOperationResult):
         self._ack_sender.operation_completed(result.operation_id)
         if result.query_id and result.operation_attrs is not None:
-            logger.error("Push results for query not implemented")
+            self._push_results_for_query(
+                result.operation_id, result.query_id, result.operation_attrs
+            )
         elif result.result is not None:
             self._push_backend_results(
                 result.operation_id, result.result, result.operation_attrs
@@ -493,8 +422,10 @@ class BaseEgressAgentService(ABC):
         else:
             logger.error(f"Invalid result for operation: {result.operation_id}")
 
-    def _restart_service(self):
-        logger.error("Restart service not implemented")
+    def _push_results_for_query(
+        self, operation_id: str, query_id: str, operation_attrs: OperationAttributes
+    ):
+        raise NotImplementedError()
 
     def _push_backend_results(
         self,
@@ -503,10 +434,10 @@ class BaseEgressAgentService(ABC):
         operation_attrs: Optional[OperationAttributes],
     ):
         if operation_attrs:
-            if not _ATTR_NAME_TRACE_ID in result:
+            if not ATTR_NAME_TRACE_ID in result:
                 result[ATTRIBUTE_NAME_TRACE_ID] = operation_attrs.trace_id
             result = self._results_processor.process_result(result, operation_attrs)
-        BackendClient.push_results(operation_id, result)
+        self._backend_client.push_results(operation_id, result)
 
     def _result_for_exception(self, ex: Exception) -> Dict:
         result: Dict[str, Any] = {

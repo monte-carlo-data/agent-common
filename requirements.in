@@ -1,4 +1,4 @@
-agent-base @ git+https://github.com/monte-carlo-data/agent-base.git@dev
+agent-base @ git+https://github.com/monte-carlo-data/agent-base.git@v0.0.1
 
 requests>=2.32.4 # Upgraded in VULN-616
 retry2==0.9.5

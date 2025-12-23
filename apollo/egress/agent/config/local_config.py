@@ -3,12 +3,13 @@ from typing import Optional, Dict
 
 from apollo.egress.agent.config.config_persistence import ConfigurationPersistence
 
-_SNA_ENV_PREFIX = "SNA"
-
 
 class LocalConfig(ConfigurationPersistence):
+    def __init__(self, prefix: str):
+        self._prefix = prefix
+
     def get_value(self, key: str) -> Optional[str]:
-        return os.getenv(f"{_SNA_ENV_PREFIX}_{key}")
+        return os.getenv(f"{self._prefix}_{key}")
 
     def set_value(self, key: str, value: str):
         raise NotImplementedError(
@@ -16,8 +17,7 @@ class LocalConfig(ConfigurationPersistence):
         )
 
     def get_all_values(self) -> Dict[str, str]:
+        prefix = f"{self._prefix}_"
         return {
-            key: value
-            for key, value in os.environ.items()
-            if key.startswith(_SNA_ENV_PREFIX)
+            key: value for key, value in os.environ.items() if key.startswith(prefix)
         }

@@ -300,8 +300,11 @@ class BaseEgressAgentService(ABC):
         return None, False
 
     def _execute_agent_operation(self, operation_id: str, event: Dict[str, Any]):
-        result = self._internal_execute_agent_operation(decode_dictionary(event))
-        self._schedule_push_results(operation_id, result)
+        try:
+            result = self._internal_execute_agent_operation(decode_dictionary(event))
+            self._schedule_push_results(operation_id, result)
+        except Exception as ex:
+            self._schedule_push_results(operation_id, self._result_for_exception(ex))
 
     @abstractmethod
     def _internal_execute_agent_operation(

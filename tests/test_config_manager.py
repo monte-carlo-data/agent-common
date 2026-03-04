@@ -1,6 +1,5 @@
-from contextlib import closing
 from unittest import TestCase
-from unittest.mock import create_autospec, patch, Mock, call
+from unittest.mock import create_autospec, call
 
 from apollo.egress.agent.config.config_manager import ConfigurationManager
 from apollo.egress.agent.config.config_persistence import ConfigurationPersistence

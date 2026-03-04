@@ -355,6 +355,8 @@ class BaseEgressAgentService(ABC):
             )
 
     def _execute_get_logs(self, operation_id: str, event: Dict[str, Any]):
+        if not self._logs_service:
+            return
         operation = event.get(ATTR_NAME_OPERATION, {})
         trace_id = operation.get(ATTR_NAME_TRACE_ID, operation_id)
         limit = operation.get(ATTR_NAME_LIMIT) or 1000
@@ -401,6 +403,8 @@ class BaseEgressAgentService(ABC):
         self._schedule_operation(_PATH_PUSH_LOGS, {ATTR_NAME_PATH: _PATH_PUSH_LOGS})
 
     def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
+        if not self._logs_service:
+            return
         payload = {
             "logs": self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000))),
         }
@@ -450,7 +454,7 @@ class BaseEgressAgentService(ABC):
         operation_attrs: Optional[OperationAttributes],
     ):
         if operation_attrs:
-            if not ATTR_NAME_TRACE_ID in result:
+            if ATTR_NAME_TRACE_ID not in result:
                 result[ATTRIBUTE_NAME_TRACE_ID] = operation_attrs.trace_id
             result = self._results_processor.process_result(result, operation_attrs)
         self._backend_client.push_results(operation_id, result)

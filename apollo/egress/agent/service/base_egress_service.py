@@ -118,6 +118,7 @@ class BaseEgressAgentService(ABC):
         logs_sender: Optional[TimerService] = None,
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
+        skip_logs_sender: bool = False,
     ):
         self._platform = platform
         self._service_name = service_name
@@ -141,12 +142,16 @@ class BaseEgressAgentService(ABC):
         )
         self._logs_service = logs_service
         self._metrics_service = metrics_service
-        self._logs_sender = logs_sender or TimerService(
-            name="Logs sender",
-            interval_seconds=config_manager.get_int_value(
-                CONFIG_PUSH_LOGS_INTERVAL_SECONDS, 300
-            ),
-        )
+        self._skip_logs_sender = skip_logs_sender
+        if skip_logs_sender:
+            self._logs_sender = None
+        else:
+            self._logs_sender = logs_sender or TimerService(
+                name="Logs sender",
+                interval_seconds=config_manager.get_int_value(
+                    CONFIG_PUSH_LOGS_INTERVAL_SECONDS, 300
+                ),
+            )
         self._storage = storage_service
         self._results_processor = ResultsProcessor(
             config_manager=self._config_manager,
@@ -191,19 +196,23 @@ class BaseEgressAgentService(ABC):
                 method=self._execute_push_metrics,
                 schedule=True,
             ),
-            OperationMapping(
-                path=_PATH_PUSH_LOGS,
-                method=self._execute_push_logs,
-                schedule=True,
-            ),
         ]
+        if not skip_logs_sender:
+            self._operations_mapping.append(
+                OperationMapping(
+                    path=_PATH_PUSH_LOGS,
+                    method=self._execute_push_logs,
+                    schedule=True,
+                ),
+            )
 
     def start(self):
         self._ops_runner.start()
         self._results_publisher.start()
         self._events_client.start(handler=self._event_handler)
         self._ack_sender.start(handler=self._send_ack)
-        self._logs_sender.start(handler=self._push_logs)
+        if self._logs_sender:
+            self._logs_sender.start(handler=self._push_logs)
 
         logger.info(
             f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()})"
@@ -214,7 +223,8 @@ class BaseEgressAgentService(ABC):
         self._results_publisher.stop()
         self._events_client.stop()
         self._ack_sender.stop()
-        self._logs_sender.stop()
+        if self._logs_sender:
+            self._logs_sender.stop()
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(

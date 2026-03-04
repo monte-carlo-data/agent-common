@@ -107,7 +107,7 @@ class BaseEgressAgentService(ABC):
         platform: str,
         service_name: str,
         config_manager: ConfigurationManager,
-        logs_service: BaseLogsService,
+        logs_service: Optional[BaseLogsService],
         metrics_service: BaseMetricsService,
         storage_service: BaseStorageService,
         login_token_provider: LoginTokenProvider,
@@ -118,7 +118,7 @@ class BaseEgressAgentService(ABC):
         logs_sender: Optional[TimerService] = None,
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
-        skip_logs_sender: bool = False,
+        skip_logs: bool = False,
     ):
         self._platform = platform
         self._service_name = service_name
@@ -140,12 +140,14 @@ class BaseEgressAgentService(ABC):
                 CONFIG_ACK_INTERVAL_SECONDS, DEFAULT_ACK_INTERVAL_SECONDS
             )
         )
-        self._logs_service = logs_service
+
         self._metrics_service = metrics_service
-        self._skip_logs_sender = skip_logs_sender
-        if skip_logs_sender:
+        self._skip_logs = skip_logs
+        if skip_logs:
             self._logs_sender = None
+            self._logs_service = None
         else:
+            self._logs_service = logs_service
             self._logs_sender = logs_sender or TimerService(
                 name="Logs sender",
                 interval_seconds=config_manager.get_int_value(
@@ -182,11 +184,6 @@ class BaseEgressAgentService(ABC):
                 schedule=True,
             ),
             OperationMapping(
-                path="/api/v1/agent/logs",
-                method=self._execute_get_logs,
-                schedule=True,
-            ),
-            OperationMapping(
                 path="/api/v1/agent/metrics",
                 method=self._execute_get_metrics,
                 schedule=True,
@@ -197,13 +194,20 @@ class BaseEgressAgentService(ABC):
                 schedule=True,
             ),
         ]
-        if not skip_logs_sender:
-            self._operations_mapping.append(
-                OperationMapping(
-                    path=_PATH_PUSH_LOGS,
-                    method=self._execute_push_logs,
-                    schedule=True,
-                ),
+        if not skip_logs:
+            self._operations_mapping.extend(
+                [
+                    OperationMapping(
+                        path="/api/v1/agent/logs",
+                        method=self._execute_get_logs,
+                        schedule=True,
+                    ),
+                    OperationMapping(
+                        path=_PATH_PUSH_LOGS,
+                        method=self._execute_push_logs,
+                        schedule=True,
+                    ),
+                ]
             )
 
     def start(self):

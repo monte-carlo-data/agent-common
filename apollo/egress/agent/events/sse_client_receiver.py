@@ -83,7 +83,7 @@ class SSEClientReceiver(BaseReceiver):
             mc_login_token = self._login_token_provider.get_token()
             token_id = mc_login_token.get(X_MCD_ID)
             logger.info(f"Connecting SSE Client, using token ID={token_id} ...")
-            url = urljoin(self._base_url, f"/stream")
+            url = urljoin(self._base_url, "/stream")
             headers = {
                 "Accept": "text/event-stream",
                 **mc_login_token,

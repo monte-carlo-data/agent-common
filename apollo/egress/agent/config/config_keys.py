@@ -25,3 +25,5 @@ CONFIG_PUSH_LOGS_INTERVAL_SECONDS = "PUSH_LOGS_INTERVAL_SECONDS"
 CONFIG_WAREHOUSE_NAME = "WAREHOUSE_NAME"
 # JSON string with job types configuration mapping job types to warehouses and configuring pool size
 CONFIG_JOB_TYPES = "JOB_TYPES"
+# interval in seconds between polling for operations when idle
+CONFIG_POLL_INTERVAL_SECONDS = "POLL_INTERVAL_SECONDS"

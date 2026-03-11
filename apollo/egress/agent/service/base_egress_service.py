@@ -332,7 +332,8 @@ class BaseEgressAgentService(ABC):
         # Process synchronously and return result
         method, _ = self._resolve_operation_method(path)
         if method:
-            return method(operation_id, {**operation, ATTR_NAME_OPERATION: op_data})
+            result = method(operation_id, {**operation, ATTR_NAME_OPERATION: op_data})
+            return result if result is not None else {}
         else:
             logger.warning(f"Unknown operation path: {path}")
             return {"error": f"Unknown operation path: {path}"}

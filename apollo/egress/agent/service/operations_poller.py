@@ -68,6 +68,11 @@ class OperationsPoller:
             while operation and self._running:
                 # Process operation
                 operation_id = operation.get("operation_id")
+                if not operation_id:
+                    logger.warning("Operation missing operation_id, skipping")
+                    operation = None
+                    continue
+
                 logger.info(
                     "Processing operation",
                     extra={"operation_id": operation_id},

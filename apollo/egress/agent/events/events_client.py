@@ -11,6 +11,7 @@ _ATTR_NAME_PUSH_METRICS = "push_metrics"
 _EVENT_TYPE_HEARTBEAT = "heartbeat"
 _EVENT_TYPE_WELCOME = "welcome"
 _EVENT_TYPE_PUSH_METRICS = "push_metrics"
+_EVENT_TYPE_WORK_AVAILABLE = "work_available"
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,15 @@ class EventsClient:
         self._stopped = True
         self._heartbeat_checker = heartbeat_checker or HeartbeatChecker(self._reconnect)
         self._event_handler: Optional[Callable[[Dict], None]] = None
+        self._work_available_handler: Optional[Callable[[], None]] = None
 
-    def start(self, handler: Callable[[Dict], None]):
+    def start(
+        self,
+        handler: Callable[[Dict], None],
+        work_available_handler: Optional[Callable[[], None]] = None,
+    ):
         self._event_handler = handler
+        self._work_available_handler = work_available_handler
         self._stopped = False
         self._receiver.start(
             handler=self._event_received,
@@ -50,6 +57,7 @@ class EventsClient:
     def stop(self):
         self._stopped = True
         self._event_handler = None
+        self._work_available_handler = None
         self._receiver.stop()
 
     def _reconnect(self):
@@ -66,6 +74,10 @@ class EventsClient:
             logger.info(f"heartbeat{additional_message}: {event.get('ts')}")
         elif event_type == _EVENT_TYPE_WELCOME:
             logger.info(f"{event_type}: agent_id={event.get(_ATTR_NAME_AGENT_ID)}")
+        elif event_type == _EVENT_TYPE_WORK_AVAILABLE:
+            logger.debug("work_available notification received")
+            if self._work_available_handler:
+                self._work_available_handler()
         elif self._event_handler:
             self._event_handler(event)
 

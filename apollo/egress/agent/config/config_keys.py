@@ -27,3 +27,5 @@ CONFIG_WAREHOUSE_NAME = "WAREHOUSE_NAME"
 CONFIG_JOB_TYPES = "JOB_TYPES"
 # interval in seconds between polling for operations when idle
 CONFIG_POLL_INTERVAL_SECONDS = "POLL_INTERVAL_SECONDS"
+# whether SSE notifications are enabled (if False, agent uses polling only)
+CONFIG_SSE_NOTIFICATIONS_ENABLED = "SSE_NOTIFICATIONS_ENABLED"

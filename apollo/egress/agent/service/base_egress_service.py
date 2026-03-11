@@ -19,7 +19,9 @@ from apollo.egress.agent.config.config_keys import (
     CONFIG_IS_REMOTE_UPGRADABLE,
     CONFIG_ACK_INTERVAL_SECONDS,
     CONFIG_PUSH_LOGS_INTERVAL_SECONDS,
+    CONFIG_SSE_NOTIFICATIONS_ENABLED,
 )
+from apollo.egress.agent.service.operations_poller import OperationsPoller
 from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
 from apollo.egress.agent.service.logs_service import BaseLogsService
 from apollo.egress.agent.service.metrics_service import BaseMetricsService
@@ -117,6 +119,7 @@ class BaseEgressAgentService(ABC):
         events_client: Optional[EventsClient] = None,
         ack_sender: Optional[AckSender] = None,
         logs_sender: Optional[TimerService] = None,
+        operations_poller: Optional[OperationsPoller] = None,
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
         skip_logs: bool = False,
@@ -163,15 +166,23 @@ class BaseEgressAgentService(ABC):
             enable_pre_signed_urls=enable_pre_signed_urls,
         )
 
+        self._backend_client = BackendClient(
+            backend_service_url=backend_service_url,
+            login_token_provider=self._login_token_provider,
+        )
+        self._sse_enabled = config_manager.get_bool_value(
+            CONFIG_SSE_NOTIFICATIONS_ENABLED, True
+        )
         self._events_client = events_client or EventsClient(
             receiver=SSEClientReceiver(
                 base_url=backend_service_url,
                 login_token_provider=self._login_token_provider,
             ),
         )
-        self._backend_client = BackendClient(
-            backend_service_url=backend_service_url,
-            login_token_provider=self._login_token_provider,
+        self._operations_poller = operations_poller or OperationsPoller(
+            backend_client=self._backend_client,
+            config_manager=config_manager,
+            operation_handler=self._handle_polled_operation,
         )
         self._operations_mapping = [
             OperationMapping(
@@ -215,7 +226,13 @@ class BaseEgressAgentService(ABC):
     def start(self):
         self._ops_runner.start()
         self._results_publisher.start()
-        self._events_client.start(handler=self._event_handler)
+        self._operations_poller.start()
+
+        if self._sse_enabled:
+            self._events_client.start(
+                handler=self._event_handler,
+                work_available_handler=self._operations_poller.notify_work_available,
+            )
         self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
             self._logs_sender.start(handler=self._push_logs)
@@ -227,7 +244,9 @@ class BaseEgressAgentService(ABC):
     def stop(self):
         self._ops_runner.stop()
         self._results_publisher.stop()
-        self._events_client.stop()
+        self._operations_poller.stop()
+        if self._sse_enabled:
+            self._events_client.stop()
         self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
@@ -284,6 +303,39 @@ class BaseEgressAgentService(ABC):
         elif op_type := (event.get(ATTR_NAME_OPERATION_TYPE)):
             if op_type == _ATTR_OPERATION_TYPE_PUSH_METRICS:
                 self._push_metrics()
+
+    def _handle_polled_operation(self, operation: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Invoked by operations poller when an operation is fetched.
+        Processes the operation synchronously and returns the result.
+        """
+        operation_id = operation.get(ATTR_NAME_OPERATION_ID)
+        path = operation.get(ATTR_NAME_PATH, "")
+
+        if not operation_id or not path:
+            logger.warning(f"Invalid polled operation: {operation}")
+            return {"error": "Invalid operation"}
+
+        logger.info(
+            f"Processing polled operation: {path}, operation_id: {operation_id}"
+        )
+
+        # ACK is not needed for pull model, but we keep it for observability during migration
+        self._ack_sender.schedule_ack(operation_id)
+
+        # Get the operation data
+        op_data = operation.get(ATTR_NAME_OPERATION, {})
+        if op_data.get(_ATTR_NAME_SIZE_EXCEEDED, False):
+            logger.info("Downloading operation from orchestrator")
+            op_data = self._backend_client.download_operation(operation_id)
+
+        # Process synchronously and return result
+        method, _ = self._resolve_operation_method(path)
+        if method:
+            return method(operation_id, {**operation, ATTR_NAME_OPERATION: op_data})
+        else:
+            logger.warning(f"Unknown operation path: {path}")
+            return {"error": f"Unknown operation path: {path}"}
 
     def _execute_operation(self, path: str, operation_id: str, event: Dict[str, Any]):
         operation = event.get(ATTR_NAME_OPERATION, {})

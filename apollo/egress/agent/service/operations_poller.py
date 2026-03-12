@@ -104,7 +104,7 @@ class OperationsPoller:
                 self._wait_for_work()
                 continue
 
-            # Fetch all available operations
+            # Fetch and submit operations until queue is empty or backpressure
             operation = self._fetch_operation()
             while operation and self._running:
                 self._submit_operation(operation)

@@ -150,4 +150,9 @@ class OperationsPoller:
     def _wait_for_work(self):
         """Wait for work_available notification or poll interval timeout."""
         with self._condition:
-            self._condition.wait(timeout=self._poll_interval)
+            notified = self._condition.wait(timeout=self._poll_interval)
+            if not notified:
+                logger.debug(
+                    "Poll interval reached, checking for work",
+                    extra={"poll_interval_seconds": self._poll_interval},
+                )

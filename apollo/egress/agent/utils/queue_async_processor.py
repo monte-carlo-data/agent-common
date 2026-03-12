@@ -39,6 +39,16 @@ class QueueAsyncProcessor(Generic[T]):
             self._queue.append(o)
             self._condition.notify_all()
 
+    def queue_depth(self) -> int:
+        """Return the current number of items in the queue."""
+        with self._condition:
+            return len(self._queue)
+
+    @property
+    def thread_count(self) -> int:
+        """Return the number of worker threads."""
+        return self._thread_count
+
     def _run(self, thread_number: int):
         thread_name = (
             f"{self._name}"

@@ -149,3 +149,40 @@ class OperationsPollerTests(TestCase):
 
         # Poller should still be running
         self.assertTrue(self._poller._running)
+
+    def test_backpressure_pauses_fetching(self):
+        """Test that poller pauses when can_accept_work returns False."""
+        # Track calls and control when work can be accepted
+        accept_calls = []
+
+        def can_accept_work():
+            accept_calls.append(time.time())
+            # Return False for first few calls to trigger backpressure
+            return len(accept_calls) > 2
+
+        operation = {"operation_id": "op-123", "path": "/test", "operation": {}}
+        self._backend_client.get_next_operation.side_effect = [
+            operation,
+            None,
+            None,
+            None,
+        ]
+
+        # Use short poll interval so we can see multiple cycles
+        self._config_manager.get_int_value.return_value = 0.1
+
+        poller = OperationsPoller(
+            backend_client=self._backend_client,
+            config_manager=self._config_manager,
+            operation_handler=self._operation_handler,
+            can_accept_work=can_accept_work,
+        )
+
+        poller.start()
+        time.sleep(0.5)
+
+        # Should have checked can_accept_work multiple times due to backpressure waits
+        self.assertGreaterEqual(len(accept_calls), 2)
+        # Eventually should have processed the operation when can_accept_work returned True
+        self._operation_handler.assert_called()
+        poller.stop()

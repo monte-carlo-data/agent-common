@@ -42,6 +42,7 @@ class OperationsPoller:
         backend_client: BackendClient,
         config_manager: ConfigurationManager,
         operation_handler: Callable[[str, str, Dict], None],
+        can_accept_work: Optional[Callable[[], bool]] = None,
     ):
         """
         Args:
@@ -50,12 +51,16 @@ class OperationsPoller:
             operation_handler: Callback to handle operations for execution.
                                Signature: (path, operation_id, operation_dict) -> None
                                Typically bound to BaseEgressAgentService._handle_polled_operation
+            can_accept_work: Optional callback that returns True if the agent can accept
+                             more work. Used for backpressure when ops_runner queue is full.
+                             If None, always accepts work.
         """
         self._backend_client = backend_client
         self._poll_interval = config_manager.get_int_value(
             CONFIG_POLL_INTERVAL_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS
         )
         self._operation_handler = operation_handler
+        self._can_accept_work = can_accept_work
         self._condition = Condition()
         self._running = False
         self._thread: Optional[Thread] = None
@@ -93,10 +98,22 @@ class OperationsPoller:
     def _run_loop(self):
         """Main polling loop: fetch operations and submit for execution."""
         while self._running:
+            # Check backpressure - wait if ops_runner queue is full
+            if self._can_accept_work and not self._can_accept_work():
+                logger.debug("Backpressure: waiting for ops_runner capacity")
+                self._wait_for_work()
+                continue
+
             # Fetch all available operations
             operation = self._fetch_operation()
             while operation and self._running:
                 self._submit_operation(operation)
+
+                # Check backpressure before fetching more
+                if self._can_accept_work and not self._can_accept_work():
+                    logger.debug("Backpressure: stopping fetch loop")
+                    break
+
                 operation = self._fetch_operation()
 
             # No more work - wait for notification or timeout

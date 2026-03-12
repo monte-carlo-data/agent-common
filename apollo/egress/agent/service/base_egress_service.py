@@ -183,6 +183,7 @@ class BaseEgressAgentService(ABC):
             backend_client=self._backend_client,
             config_manager=config_manager,
             operation_handler=self._handle_polled_operation,
+            can_accept_work=self._can_accept_work,
         )
         self._operations_mapping = [
             OperationMapping(
@@ -303,6 +304,17 @@ class BaseEgressAgentService(ABC):
         elif op_type := (event.get(ATTR_NAME_OPERATION_TYPE)):
             if op_type == _ATTR_OPERATION_TYPE_PUSH_METRICS:
                 self._push_metrics()
+
+    def _can_accept_work(self) -> bool:
+        """Check if ops_runner can accept more work (backpressure control)."""
+        queue_depth = self._ops_runner.queue_depth()
+        max_depth = self._ops_runner.thread_count
+        can_accept = queue_depth < max_depth
+        if not can_accept:
+            logger.debug(
+                f"Backpressure active: queue_depth={queue_depth}, max={max_depth}"
+            )
+        return can_accept
 
     def _handle_polled_operation(
         self, path: str, operation_id: str, operation: Dict[str, Any]

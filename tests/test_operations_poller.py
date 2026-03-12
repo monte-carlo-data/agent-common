@@ -186,3 +186,57 @@ class OperationsPollerTests(TestCase):
         # Eventually should have processed the operation when can_accept_work returned True
         self._operation_handler.assert_called()
         poller.stop()
+
+    def test_backpressure_stops_mid_fetch_loop(self):
+        """Test that backpressure stops fetching after submitting one operation."""
+        # Allow first operation, reject second
+        call_count = [0]
+
+        def can_accept_work():
+            call_count[0] += 1
+            # Allow first submit, block after that
+            return call_count[0] <= 1
+
+        op1 = {"operation_id": "op-1", "path": "/test1", "operation": {}}
+        op2 = {"operation_id": "op-2", "path": "/test2", "operation": {}}
+        # Provide two operations, but backpressure should stop after first
+        self._backend_client.get_next_operation.side_effect = [op1, op2, None, None]
+
+        self._config_manager.get_int_value.return_value = 0.1
+
+        poller = OperationsPoller(
+            backend_client=self._backend_client,
+            config_manager=self._config_manager,
+            operation_handler=self._operation_handler,
+            can_accept_work=can_accept_work,
+        )
+
+        poller.start()
+        time.sleep(0.3)
+
+        # First operation should be submitted
+        self.assertGreaterEqual(self._operation_handler.call_count, 1)
+        # Backpressure should have been checked multiple times
+        self.assertGreater(call_count[0], 1)
+        poller.stop()
+
+    def test_no_backpressure_when_can_accept_work_is_none(self):
+        """Test that poller fetches normally when can_accept_work is not provided."""
+        op1 = {"operation_id": "op-1", "path": "/test1", "operation": {}}
+        op2 = {"operation_id": "op-2", "path": "/test2", "operation": {}}
+        self._backend_client.get_next_operation.side_effect = [op1, op2, None]
+
+        # No can_accept_work callback - should fetch all available
+        poller = OperationsPoller(
+            backend_client=self._backend_client,
+            config_manager=self._config_manager,
+            operation_handler=self._operation_handler,
+            # can_accept_work not provided (defaults to None)
+        )
+
+        poller.start()
+        time.sleep(0.3)
+
+        # Both operations should be submitted
+        self.assertEqual(self._operation_handler.call_count, 2)
+        poller.stop()

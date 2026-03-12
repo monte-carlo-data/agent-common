@@ -189,3 +189,39 @@ class BaseEgressServiceTests(TestCase):
         self._service._push_backend_results("op-123", {"result": "test"}, None)
 
         self._service._handle_piggybacked_operation.assert_not_called()
+
+    def test_can_accept_work_returns_true_when_queue_empty(self):
+        """Test _can_accept_work returns True when ops_runner queue is empty."""
+        self._ops_runner.queue_depth.return_value = 0
+        self._ops_runner.thread_count = 4
+
+        result = self._service._can_accept_work()
+
+        self.assertTrue(result)
+
+    def test_can_accept_work_returns_true_when_queue_below_capacity(self):
+        """Test _can_accept_work returns True when queue < thread_count."""
+        self._ops_runner.queue_depth.return_value = 2
+        self._ops_runner.thread_count = 4
+
+        result = self._service._can_accept_work()
+
+        self.assertTrue(result)
+
+    def test_can_accept_work_returns_false_when_queue_at_capacity(self):
+        """Test _can_accept_work returns False when queue == thread_count."""
+        self._ops_runner.queue_depth.return_value = 4
+        self._ops_runner.thread_count = 4
+
+        result = self._service._can_accept_work()
+
+        self.assertFalse(result)
+
+    def test_can_accept_work_returns_false_when_queue_over_capacity(self):
+        """Test _can_accept_work returns False when queue > thread_count."""
+        self._ops_runner.queue_depth.return_value = 5
+        self._ops_runner.thread_count = 4
+
+        result = self._service._can_accept_work()
+
+        self.assertFalse(result)

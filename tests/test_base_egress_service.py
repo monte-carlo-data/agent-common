@@ -106,55 +106,86 @@ class BaseEgressServiceTests(TestCase):
 
         self._events_client.stop.assert_not_called()
 
-    def test_handle_polled_operation_returns_error_for_invalid_operation(self):
-        """Test that _handle_polled_operation returns error for invalid operation."""
-        result = self._service._handle_polled_operation({})
-
-        self.assertEqual(result, {"error": "Invalid operation"})
-
     def test_handle_polled_operation_schedules_ack(self):
         """Test that _handle_polled_operation schedules ACK."""
-        self._service._resolve_operation_method = Mock(
-            return_value=(Mock(return_value={}), None)
-        )
-        operation = {
-            ATTR_NAME_OPERATION_ID: "op-123",
-            ATTR_NAME_PATH: "/test/path",
-            ATTR_NAME_OPERATION: {"data": "test"},
-        }
+        self._service._execute_operation = Mock()
 
-        self._service._handle_polled_operation(operation)
+        self._service._handle_polled_operation("/test/path", "op-123", {"data": "test"})
 
         self._ack_sender.schedule_ack.assert_called_once_with("op-123")
 
-    def test_handle_polled_operation_downloads_size_exceeded_operation(self):
-        """Test that _handle_polled_operation downloads size-exceeded operations."""
-        self._service._resolve_operation_method = Mock(
-            return_value=(Mock(return_value={}), None)
-        )
-        self._backend_client.download_operation.return_value = {"downloaded": "data"}
-        operation = {
-            ATTR_NAME_OPERATION_ID: "op-123",
-            ATTR_NAME_PATH: "/test/path",
-            ATTR_NAME_OPERATION: {"__mcd_size_exceeded__": True},
-        }
-
-        self._service._handle_polled_operation(operation)
-
-        self._backend_client.download_operation.assert_called_once_with("op-123")
-
-    def test_handle_polled_operation_calls_method_and_returns_result(self):
-        """Test that _handle_polled_operation calls the resolved method."""
-        expected_result = {"result": "success"}
-        mock_method = Mock(return_value=expected_result)
-        self._service._resolve_operation_method = Mock(return_value=(mock_method, None))
+    def test_handle_polled_operation_calls_execute_operation(self):
+        """Test that _handle_polled_operation calls _execute_operation."""
+        self._service._execute_operation = Mock()
         operation = {
             ATTR_NAME_OPERATION_ID: "op-123",
             ATTR_NAME_PATH: "/test/path",
             ATTR_NAME_OPERATION: {"data": "test"},
         }
 
-        result = self._service._handle_polled_operation(operation)
+        self._service._handle_polled_operation("/test/path", "op-123", operation)
 
-        self.assertEqual(result, expected_result)
-        mock_method.assert_called_once()
+        self._service._execute_operation.assert_called_once_with(
+            "/test/path", "op-123", operation
+        )
+
+    def test_handle_piggybacked_operation_schedules_ack(self):
+        """Test that _handle_piggybacked_operation schedules ACK."""
+        self._service._execute_operation = Mock()
+        operation = {
+            ATTR_NAME_OPERATION_ID: "op-456",
+            ATTR_NAME_PATH: "/piggybacked/path",
+            ATTR_NAME_OPERATION: {"data": "piggybacked"},
+        }
+
+        self._service._handle_piggybacked_operation(operation)
+
+        self._ack_sender.schedule_ack.assert_called_once_with("op-456")
+
+    def test_handle_piggybacked_operation_calls_execute_operation(self):
+        """Test that _handle_piggybacked_operation calls _execute_operation."""
+        self._service._execute_operation = Mock()
+        operation = {
+            ATTR_NAME_OPERATION_ID: "op-456",
+            ATTR_NAME_PATH: "/piggybacked/path",
+            ATTR_NAME_OPERATION: {"data": "piggybacked"},
+        }
+
+        self._service._handle_piggybacked_operation(operation)
+
+        self._service._execute_operation.assert_called_once_with(
+            "/piggybacked/path", "op-456", operation
+        )
+
+    def test_handle_piggybacked_operation_skips_invalid(self):
+        """Test that _handle_piggybacked_operation skips invalid operations."""
+        self._service._execute_operation = Mock()
+
+        # Missing path
+        self._service._handle_piggybacked_operation({ATTR_NAME_OPERATION_ID: "op-123"})
+        # Missing operation_id
+        self._service._handle_piggybacked_operation({ATTR_NAME_PATH: "/test"})
+
+        self._service._execute_operation.assert_not_called()
+
+    def test_push_backend_results_handles_piggybacked_operation(self):
+        """Test that _push_backend_results processes piggybacked operations."""
+        self._service._handle_piggybacked_operation = Mock()
+        next_op = {
+            ATTR_NAME_OPERATION_ID: "next-op",
+            ATTR_NAME_PATH: "/next/path",
+        }
+        self._backend_client.push_results.return_value = {"next_operation": next_op}
+
+        self._service._push_backend_results("op-123", {"result": "test"}, None)
+
+        self._service._handle_piggybacked_operation.assert_called_once_with(next_op)
+
+    def test_push_backend_results_no_piggyback(self):
+        """Test that _push_backend_results works when no piggybacked operation."""
+        self._service._handle_piggybacked_operation = Mock()
+        self._backend_client.push_results.return_value = {"operation_id": "op-123"}
+
+        self._service._push_backend_results("op-123", {"result": "test"}, None)
+
+        self._service._handle_piggybacked_operation.assert_not_called()

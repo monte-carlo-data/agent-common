@@ -304,39 +304,22 @@ class BaseEgressAgentService(ABC):
             if op_type == _ATTR_OPERATION_TYPE_PUSH_METRICS:
                 self._push_metrics()
 
-    def _handle_polled_operation(self, operation: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_polled_operation(
+        self, path: str, operation_id: str, operation: Dict[str, Any]
+    ):
         """
         Invoked by operations poller when an operation is fetched.
-        Processes the operation synchronously and returns the result.
+        Schedules ACK and executes via existing async flow.
         """
-        operation_id = operation.get(ATTR_NAME_OPERATION_ID)
-        path = operation.get(ATTR_NAME_PATH, "")
-
-        if not operation_id or not path:
-            logger.warning(f"Invalid polled operation: {operation}")
-            return {"error": "Invalid operation"}
-
         logger.info(
             f"Processing polled operation: {path}, operation_id: {operation_id}"
         )
 
-        # ACK is not needed for pull model, but we keep it for observability during migration
+        # Schedule ACK (same as push model)
         self._ack_sender.schedule_ack(operation_id)
 
-        # Get the operation data
-        op_data = operation.get(ATTR_NAME_OPERATION, {})
-        if op_data.get(_ATTR_NAME_SIZE_EXCEEDED, False):
-            logger.info("Downloading operation from orchestrator")
-            op_data = self._backend_client.download_operation(operation_id)
-
-        # Process synchronously and return result
-        method, _ = self._resolve_operation_method(path)
-        if method:
-            result = method(operation_id, {**operation, ATTR_NAME_OPERATION: op_data})
-            return result if result is not None else {}
-        else:
-            logger.warning(f"Unknown operation path: {path}")
-            return {"error": f"Unknown operation path: {path}"}
+        # Execute via existing async flow (ops_runner -> results_publisher)
+        self._execute_operation(path, operation_id, operation)
 
     def _execute_operation(self, path: str, operation_id: str, event: Dict[str, Any]):
         operation = event.get(ATTR_NAME_OPERATION, {})
@@ -513,7 +496,30 @@ class BaseEgressAgentService(ABC):
             if ATTR_NAME_TRACE_ID not in result:
                 result[ATTRIBUTE_NAME_TRACE_ID] = operation_attrs.trace_id
             result = self._results_processor.process_result(result, operation_attrs)
-        self._backend_client.push_results(operation_id, result)
+        response = self._backend_client.push_results(operation_id, result)
+
+        # Handle piggybacked operation from orchestrator
+        if response and (next_op := response.get("next_operation")):
+            self._handle_piggybacked_operation(next_op)
+
+    def _handle_piggybacked_operation(self, operation: Dict[str, Any]):
+        """Process a piggybacked operation received from push_results response."""
+        path = operation.get(ATTR_NAME_PATH, "")
+        operation_id = operation.get(ATTR_NAME_OPERATION_ID)
+
+        if not path or not operation_id:
+            logger.warning(f"Invalid piggybacked operation: {operation}")
+            return
+
+        logger.info(
+            f"Received piggybacked operation: {path}, operation_id: {operation_id}"
+        )
+
+        # Schedule ACK (same as push model)
+        self._ack_sender.schedule_ack(operation_id)
+
+        # Execute via existing flow
+        self._execute_operation(path, operation_id, operation)
 
     def _result_for_exception(self, ex: Exception) -> Dict:
         result: Dict[str, Any] = {

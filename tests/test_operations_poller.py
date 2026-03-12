@@ -9,10 +9,8 @@ class OperationsPollerTests(TestCase):
     def setUp(self):
         self._backend_client = Mock()
         self._config_manager = Mock()
-        self._config_manager.get_int_value.return_value = (
-            1  # 1 second poll interval for tests
-        )
-        self._operation_handler = Mock(return_value={"result": "success"})
+        self._config_manager.get_int_value.return_value = 1  # 1 second poll interval
+        self._operation_handler = Mock()
         self._poller = OperationsPoller(
             backend_client=self._backend_client,
             config_manager=self._config_manager,
@@ -68,37 +66,33 @@ class OperationsPollerTests(TestCase):
 
         self.assertFalse(self._poller._running)
 
-    def test_processes_operation_and_pushes_result(self):
-        """Test that operations are processed and results pushed."""
+    def test_submits_operation_to_handler(self):
+        """Test that fetched operations are submitted via operation_handler."""
         operation = {"operation_id": "op-123", "path": "/test", "operation": {}}
         self._backend_client.get_next_operation.side_effect = [operation, None]
-        self._backend_client.push_results.return_value = {"operation_id": "op-123"}
 
         self._poller.start()
         time.sleep(0.2)
 
-        self._operation_handler.assert_called_once_with(operation)
-        self._backend_client.push_results.assert_called_once_with(
-            "op-123", {"result": "success"}
-        )
+        # Operation should be submitted with (path, operation_id, operation)
+        self._operation_handler.assert_called_once_with("/test", "op-123", operation)
 
-    def test_piggyback_processes_next_operation(self):
-        """Test that piggybacked operation is processed immediately."""
+    def test_fetches_multiple_operations_in_sequence(self):
+        """Test that poller fetches all available operations."""
         operation1 = {"operation_id": "op-1", "path": "/test1", "operation": {}}
         operation2 = {"operation_id": "op-2", "path": "/test2", "operation": {}}
 
-        self._backend_client.get_next_operation.side_effect = [operation1, None]
-        self._backend_client.push_results.side_effect = [
-            {"operation_id": "op-1", "next_operation": operation2},
-            {"operation_id": "op-2"},
+        self._backend_client.get_next_operation.side_effect = [
+            operation1,
+            operation2,
+            None,
         ]
 
         self._poller.start()
         time.sleep(0.3)
 
-        # Both operations should be processed
+        # Both operations should be submitted
         self.assertEqual(self._operation_handler.call_count, 2)
-        self.assertEqual(self._backend_client.push_results.call_count, 2)
 
     def test_notify_work_available_wakes_poller(self):
         """Test that notify_work_available wakes the poller from waiting."""
@@ -124,21 +118,34 @@ class OperationsPollerTests(TestCase):
         )
         poller.stop()
 
-    def test_handler_exception_does_not_crash_loop(self):
-        """Test that exception in handler doesn't crash the polling loop."""
-        operation = {"operation_id": "op-123", "path": "/test", "operation": {}}
+    def test_skips_invalid_operation(self):
+        """Test that operations without path or operation_id are skipped."""
+        invalid_op = {"operation_id": "op-123"}  # Missing path
+        valid_op = {"operation_id": "op-456", "path": "/test"}
         self._backend_client.get_next_operation.side_effect = [
-            operation,
-            None,
-            None,
+            invalid_op,
+            valid_op,
             None,
         ]
-        self._operation_handler.side_effect = Exception("Handler error")
 
         self._poller.start()
-        time.sleep(0.5)
+        time.sleep(0.3)
+
+        # Only valid operation should be submitted
+        self._operation_handler.assert_called_once_with("/test", "op-456", valid_op)
+
+    def test_continues_after_fetch_error(self):
+        """Test that poller continues after fetch error."""
+        operation = {"operation_id": "op-123", "path": "/test", "operation": {}}
+        self._backend_client.get_next_operation.side_effect = [
+            Exception("Network error"),
+            None,  # Will wait here
+            operation,
+            None,
+        ]
+
+        self._poller.start()
+        time.sleep(0.3)
 
         # Poller should still be running
         self.assertTrue(self._poller._running)
-        # Should have called get_next_operation at least once (initial call)
-        self.assertGreaterEqual(self._backend_client.get_next_operation.call_count, 1)

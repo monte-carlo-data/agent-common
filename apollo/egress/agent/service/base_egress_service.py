@@ -61,6 +61,7 @@ ATTR_NAME_PARAMETERS = "parameters"
 ATTR_NAME_CONFIG = "config"
 ATTR_NAME_ENV = "env"
 ATTR_NAME_KEY_ID = "authentication_key_id"
+ATTR_NAME_BACKEND_URL = "backend_url"
 ATTR_NAME_JOB_TYPE = "job_type"
 ATTR_NAME_VERSION = "version"
 ATTR_NAME_BUILD = "build"
@@ -122,6 +123,7 @@ class BaseEgressAgentService(ABC):
     ):
         self._platform = platform
         self._service_name = service_name
+        self._backend_service_url = backend_service_url
         self._additional_env_vars = additional_env_vars
         self._config_manager = config_manager
         self._login_token_provider = login_token_provider
@@ -248,6 +250,7 @@ class BaseEgressAgentService(ABC):
         health_info[ATTR_NAME_KEY_ID] = self._login_token_provider.get_token().get(
             X_MCD_ID
         )
+        health_info[ATTR_NAME_BACKEND_URL] = self._backend_service_url
         return health_info
 
     def run_reachability_test(self, trace_id: Optional[str] = None) -> Dict[str, Any]:

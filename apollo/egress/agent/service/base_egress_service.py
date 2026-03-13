@@ -61,6 +61,7 @@ ATTR_NAME_PARAMETERS = "parameters"
 ATTR_NAME_CONFIG = "config"
 ATTR_NAME_ENV = "env"
 ATTR_NAME_KEY_ID = "authentication_key_id"
+ATTR_NAME_BACKEND_URL = "backend_url"
 ATTR_NAME_JOB_TYPE = "job_type"
 ATTR_NAME_VERSION = "version"
 ATTR_NAME_BUILD = "build"
@@ -107,7 +108,7 @@ class BaseEgressAgentService(ABC):
         platform: str,
         service_name: str,
         config_manager: ConfigurationManager,
-        logs_service: BaseLogsService,
+        logs_service: Optional[BaseLogsService],
         metrics_service: BaseMetricsService,
         storage_service: BaseStorageService,
         login_token_provider: LoginTokenProvider,
@@ -118,9 +119,11 @@ class BaseEgressAgentService(ABC):
         logs_sender: Optional[TimerService] = None,
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
+        skip_logs: bool = False,
     ):
         self._platform = platform
         self._service_name = service_name
+        self._backend_service_url = backend_service_url
         self._additional_env_vars = additional_env_vars
         self._config_manager = config_manager
         self._login_token_provider = login_token_provider
@@ -139,14 +142,20 @@ class BaseEgressAgentService(ABC):
                 CONFIG_ACK_INTERVAL_SECONDS, DEFAULT_ACK_INTERVAL_SECONDS
             )
         )
-        self._logs_service = logs_service
+
         self._metrics_service = metrics_service
-        self._logs_sender = logs_sender or TimerService(
-            name="Logs sender",
-            interval_seconds=config_manager.get_int_value(
-                CONFIG_PUSH_LOGS_INTERVAL_SECONDS, 300
-            ),
-        )
+        self._skip_logs = skip_logs
+        if skip_logs:
+            self._logs_sender = None
+            self._logs_service = None
+        else:
+            self._logs_service = logs_service
+            self._logs_sender = logs_sender or TimerService(
+                name="Logs sender",
+                interval_seconds=config_manager.get_int_value(
+                    CONFIG_PUSH_LOGS_INTERVAL_SECONDS, 300
+                ),
+            )
         self._storage = storage_service
         self._results_processor = ResultsProcessor(
             config_manager=self._config_manager,
@@ -177,11 +186,6 @@ class BaseEgressAgentService(ABC):
                 schedule=True,
             ),
             OperationMapping(
-                path="/api/v1/agent/logs",
-                method=self._execute_get_logs,
-                schedule=True,
-            ),
-            OperationMapping(
                 path="/api/v1/agent/metrics",
                 method=self._execute_get_metrics,
                 schedule=True,
@@ -191,19 +195,30 @@ class BaseEgressAgentService(ABC):
                 method=self._execute_push_metrics,
                 schedule=True,
             ),
-            OperationMapping(
-                path=_PATH_PUSH_LOGS,
-                method=self._execute_push_logs,
-                schedule=True,
-            ),
         ]
+        if not skip_logs:
+            self._operations_mapping.extend(
+                [
+                    OperationMapping(
+                        path="/api/v1/agent/logs",
+                        method=self._execute_get_logs,
+                        schedule=True,
+                    ),
+                    OperationMapping(
+                        path=_PATH_PUSH_LOGS,
+                        method=self._execute_push_logs,
+                        schedule=True,
+                    ),
+                ]
+            )
 
     def start(self):
         self._ops_runner.start()
         self._results_publisher.start()
         self._events_client.start(handler=self._event_handler)
         self._ack_sender.start(handler=self._send_ack)
-        self._logs_sender.start(handler=self._push_logs)
+        if self._logs_sender:
+            self._logs_sender.start(handler=self._push_logs)
 
         logger.info(
             f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()})"
@@ -214,7 +229,8 @@ class BaseEgressAgentService(ABC):
         self._results_publisher.stop()
         self._events_client.stop()
         self._ack_sender.stop()
-        self._logs_sender.stop()
+        if self._logs_sender:
+            self._logs_sender.stop()
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(
@@ -234,6 +250,7 @@ class BaseEgressAgentService(ABC):
         health_info[ATTR_NAME_KEY_ID] = self._login_token_provider.get_token().get(
             X_MCD_ID
         )
+        health_info[ATTR_NAME_BACKEND_URL] = self._backend_service_url
         return health_info
 
     def run_reachability_test(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
@@ -341,6 +358,8 @@ class BaseEgressAgentService(ABC):
             )
 
     def _execute_get_logs(self, operation_id: str, event: Dict[str, Any]):
+        if not self._logs_service:
+            return
         operation = event.get(ATTR_NAME_OPERATION, {})
         trace_id = operation.get(ATTR_NAME_TRACE_ID, operation_id)
         limit = operation.get(ATTR_NAME_LIMIT) or 1000
@@ -387,6 +406,8 @@ class BaseEgressAgentService(ABC):
         self._schedule_operation(_PATH_PUSH_LOGS, {ATTR_NAME_PATH: _PATH_PUSH_LOGS})
 
     def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
+        if not self._logs_service:
+            return
         payload = {
             "logs": self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000))),
         }
@@ -436,7 +457,7 @@ class BaseEgressAgentService(ABC):
         operation_attrs: Optional[OperationAttributes],
     ):
         if operation_attrs:
-            if not ATTR_NAME_TRACE_ID in result:
+            if ATTR_NAME_TRACE_ID not in result:
                 result[ATTRIBUTE_NAME_TRACE_ID] = operation_attrs.trace_id
             result = self._results_processor.process_result(result, operation_attrs)
         self._backend_client.push_results(operation_id, result)

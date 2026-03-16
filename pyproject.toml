@@ -40,6 +40,8 @@ pythonpath = "."
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.in"]}
 
+[tool.setuptools_scm]
+
 [build-system]
 requires = ["setuptools>=67.7.2", "setuptools_scm[toml]>=8.0"]
 build-backend = "setuptools.build_meta"

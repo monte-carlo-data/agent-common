@@ -231,8 +231,8 @@ class BaseEgressAgentService(ABC):
 
         if self._sse_enabled:
             self._events_client.start(
-                handler=self._event_handler,
                 work_available_handler=self._operations_poller.notify_work_available,
+                push_metrics_handler=self._push_metrics,
             )
         self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
@@ -287,23 +287,6 @@ class BaseEgressAgentService(ABC):
     @abstractmethod
     def _get_build_number(self) -> str:
         raise NotImplementedError
-
-    def _event_handler(self, event: Dict[str, Any]):
-        """
-        Invoked by events client when an event is received with an agent operation to run
-        """
-        operation_id = event.get(ATTR_NAME_OPERATION_ID)
-        if operation_id:
-            path: str = event.get(ATTR_NAME_PATH, "")
-            if path:
-                logger.info(
-                    f"Received agent operation: {path}, operation_id: {operation_id}"
-                )
-                self._ack_sender.schedule_ack(operation_id)
-                self._execute_operation(path, operation_id, event)
-        elif op_type := (event.get(ATTR_NAME_OPERATION_TYPE)):
-            if op_type == _ATTR_OPERATION_TYPE_PUSH_METRICS:
-                self._push_metrics()
 
     def _can_accept_work(self) -> bool:
         """Check if ops_runner can accept more work (backpressure control)."""

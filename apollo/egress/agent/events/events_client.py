@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 
 class EventsClient:
     """
-    Client that abstract the underlying technology used to receive events from the backend,
-    it could use a polling approach or a push approach like websockets or SSE.
-    It delegates the creation of the receiver (the actual implementation that generates events)
-    to the `ReceiverFactory`, which uses `SSE` by default.
-    There are two event types that are handled here and not forwarded to the event handler:
-    - `welcome`: sent as the first message after the connection is established
-    - `heartbeat`: sent periodically by the server (by default every minute) to keep the connection
-        alive. This class will re-establish the connection if we don't receive a heartbeat after
-        2 minutes.
+    Client that abstracts the underlying technology used to receive events from the backend.
+    Uses SSE (Server-Sent Events) by default.
+
+    Handles the following event types:
+    - `welcome`: sent as the first message after connection is established
+    - `heartbeat`: sent periodically by the server to keep connection alive.
+        This class will re-establish the connection if no heartbeat after 2 minutes.
+        Heartbeat may include `push_metrics` flag to trigger metrics push.
+    - `work_available`: notification that new work is available for polling
     """
 
     def __init__(
@@ -37,16 +37,16 @@ class EventsClient:
         self._receiver = receiver
         self._stopped = True
         self._heartbeat_checker = heartbeat_checker or HeartbeatChecker(self._reconnect)
-        self._event_handler: Optional[Callable[[Dict], None]] = None
         self._work_available_handler: Optional[Callable[[], None]] = None
+        self._push_metrics_handler: Optional[Callable[[], None]] = None
 
     def start(
         self,
-        handler: Callable[[Dict], None],
-        work_available_handler: Optional[Callable[[], None]] = None,
+        work_available_handler: Callable[[], None],
+        push_metrics_handler: Callable[[], None],
     ):
-        self._event_handler = handler
         self._work_available_handler = work_available_handler
+        self._push_metrics_handler = push_metrics_handler
         self._stopped = False
         self._receiver.start(
             handler=self._event_received,
@@ -56,8 +56,8 @@ class EventsClient:
 
     def stop(self):
         self._stopped = True
-        self._event_handler = None
         self._work_available_handler = None
+        self._push_metrics_handler = None
         self._receiver.stop()
 
     def _reconnect(self):
@@ -68,9 +68,9 @@ class EventsClient:
         if event_type == _EVENT_TYPE_HEARTBEAT:
             self._heartbeat_checker.heartbeat_received()
             additional_message = ""
-            if event.get(_ATTR_NAME_PUSH_METRICS, False) and self._event_handler:
+            if event.get(_ATTR_NAME_PUSH_METRICS, False) and self._push_metrics_handler:
                 additional_message = "(push_metrics)"
-                self._event_handler({_ATTR_NAME_EVENT_TYPE: _EVENT_TYPE_PUSH_METRICS})
+                self._push_metrics_handler()
             logger.info(f"heartbeat{additional_message}: {event.get('ts')}")
         elif event_type == _EVENT_TYPE_WELCOME:
             logger.info(f"{event_type}: agent_id={event.get(_ATTR_NAME_AGENT_ID)}")
@@ -78,8 +78,9 @@ class EventsClient:
             logger.debug("work_available notification received")
             if self._work_available_handler:
                 self._work_available_handler()
-        elif self._event_handler:
-            self._event_handler(event)
+        else:
+            # Log unexpected event types for debugging
+            logger.debug(f"Ignoring event type: {event_type}")
 
     def _receiver_connected(self):
         self._heartbeat_checker.start()

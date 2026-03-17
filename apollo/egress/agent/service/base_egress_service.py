@@ -20,6 +20,7 @@ from apollo.egress.agent.config.config_keys import (
     CONFIG_ACK_INTERVAL_SECONDS,
     CONFIG_PUSH_LOGS_INTERVAL_SECONDS,
     CONFIG_SSE_NOTIFICATIONS_ENABLED,
+    CONFIG_METRICS_TIMER_ENABLED,
 )
 from apollo.egress.agent.service.operations_poller import OperationsPoller
 from apollo.egress.agent.service.metrics_timer import MetricsTimer
@@ -186,10 +187,12 @@ class BaseEgressAgentService(ABC):
             operation_handler=self._handle_polled_operation,
             can_accept_work=self._can_accept_work,
         )
-        self._metrics_timer = MetricsTimer(
-            config_manager=config_manager,
-            push_metrics_handler=self._push_metrics,
-        )
+        self._metrics_timer = None
+        if config_manager.get_bool_value(CONFIG_METRICS_TIMER_ENABLED, False):
+            self._metrics_timer = MetricsTimer(
+                config_manager=config_manager,
+                push_metrics_handler=self._push_metrics,
+            )
         self._operations_mapping = [
             OperationMapping(
                 path="/api/v1/agent/execute/",
@@ -233,7 +236,8 @@ class BaseEgressAgentService(ABC):
         self._ops_runner.start()
         self._results_publisher.start()
         self._operations_poller.start()
-        self._metrics_timer.start()
+        if self._metrics_timer:
+            self._metrics_timer.start()
 
         if self._sse_enabled:
             self._events_client.start(
@@ -251,7 +255,8 @@ class BaseEgressAgentService(ABC):
         self._ops_runner.stop()
         self._results_publisher.stop()
         self._operations_poller.stop()
-        self._metrics_timer.stop()
+        if self._metrics_timer:
+            self._metrics_timer.stop()
         if self._sse_enabled:
             self._events_client.stop()
         self._ack_sender.stop()

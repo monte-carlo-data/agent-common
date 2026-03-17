@@ -90,6 +90,45 @@ class BaseEgressServiceTests(TestCase):
 
         self._operations_poller.stop.assert_called_once()
 
+    def test_metrics_timer_not_created_when_disabled(self):
+        """Test that _metrics_timer is None when METRICS_TIMER_ENABLED=False."""
+        self._config_manager.get_bool_value.return_value = False
+        with patch(
+            "apollo.egress.agent.service.base_egress_service.BackendClient"
+        ) as mock_backend:
+            mock_backend.return_value = self._backend_client
+            service = ConcreteEgressService(
+                backend_service_url="http://test",
+                platform="test",
+                service_name="Test",
+                config_manager=self._config_manager,
+                logs_service=None,
+                metrics_service=Mock(),
+                storage_service=Mock(),
+                login_token_provider=Mock(),
+                ops_runner=self._ops_runner,
+                results_publisher=self._results_publisher,
+                events_client=self._events_client,
+                ack_sender=self._ack_sender,
+                operations_poller=self._operations_poller,
+                skip_logs=True,
+            )
+
+        self.assertIsNone(service._metrics_timer)
+
+    def test_metrics_timer_created_when_enabled(self):
+        """Test that _metrics_timer is created when METRICS_TIMER_ENABLED=True."""
+        # setUp already sets get_bool_value to return True
+        self.assertIsNotNone(self._service._metrics_timer)
+
+    def test_start_does_not_fail_when_metrics_timer_disabled(self):
+        """Test that start() works when metrics timer is disabled."""
+        self._service._sse_enabled = False
+        self._service._metrics_timer = None  # Simulate disabled
+
+        # Should not raise
+        self._service.start()
+
     def test_stop_stops_events_client_when_sse_enabled(self):
         """Test that stop() stops events client when SSE is enabled."""
         self._service._sse_enabled = True

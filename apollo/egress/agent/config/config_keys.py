@@ -29,5 +29,7 @@ CONFIG_JOB_TYPES = "JOB_TYPES"
 CONFIG_POLL_INTERVAL_SECONDS = "POLL_INTERVAL_SECONDS"
 # whether SSE notifications are enabled (if False, agent uses polling only)
 CONFIG_SSE_NOTIFICATIONS_ENABLED = "SSE_NOTIFICATIONS_ENABLED"
-# interval in seconds between metrics pushes
+# whether the metrics timer is enabled
+CONFIG_METRICS_TIMER_ENABLED = "METRICS_TIMER_ENABLED"
+# interval in seconds between metrics pushes (only used if metrics timer is enabled)
 CONFIG_METRICS_PUSH_INTERVAL_SECONDS = "METRICS_PUSH_INTERVAL_SECONDS"

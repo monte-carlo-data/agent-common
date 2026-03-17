@@ -72,10 +72,9 @@ class BaseEgressServiceTests(TestCase):
         self._service.start()
 
         self._events_client.start.assert_called_once()
-        # Verify handlers are passed
+        # Verify work_available_handler is passed
         call_kwargs = self._events_client.start.call_args.kwargs
         self.assertIn("work_available_handler", call_kwargs)
-        self.assertIn("push_metrics_handler", call_kwargs)
 
     def test_start_skips_events_client_when_sse_disabled(self):
         """Test that start() skips events client when SSE is disabled."""

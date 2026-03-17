@@ -6,11 +6,9 @@ from apollo.egress.agent.events.heartbeat_checker import HeartbeatChecker
 
 _ATTR_NAME_EVENT_TYPE = "type"
 _ATTR_NAME_AGENT_ID = "agent_id"
-_ATTR_NAME_PUSH_METRICS = "push_metrics"
 
 _EVENT_TYPE_HEARTBEAT = "heartbeat"
 _EVENT_TYPE_WELCOME = "welcome"
-_EVENT_TYPE_PUSH_METRICS = "push_metrics"
 _EVENT_TYPE_WORK_AVAILABLE = "work_available"
 
 logger = logging.getLogger(__name__)
@@ -25,7 +23,6 @@ class EventsClient:
     - `welcome`: sent as the first message after connection is established
     - `heartbeat`: sent periodically by the server to keep connection alive.
         This class will re-establish the connection if no heartbeat after 2 minutes.
-        Heartbeat may include `push_metrics` flag to trigger metrics push.
     - `work_available`: notification that new work is available for polling
     """
 
@@ -38,15 +35,12 @@ class EventsClient:
         self._stopped = True
         self._heartbeat_checker = heartbeat_checker or HeartbeatChecker(self._reconnect)
         self._work_available_handler: Optional[Callable[[], None]] = None
-        self._push_metrics_handler: Optional[Callable[[], None]] = None
 
     def start(
         self,
         work_available_handler: Callable[[], None],
-        push_metrics_handler: Callable[[], None],
     ):
         self._work_available_handler = work_available_handler
-        self._push_metrics_handler = push_metrics_handler
         self._stopped = False
         self._receiver.start(
             handler=self._event_received,
@@ -57,7 +51,6 @@ class EventsClient:
     def stop(self):
         self._stopped = True
         self._work_available_handler = None
-        self._push_metrics_handler = None
         self._receiver.stop()
 
     def _reconnect(self):
@@ -67,11 +60,7 @@ class EventsClient:
         event_type = event.get(_ATTR_NAME_EVENT_TYPE)
         if event_type == _EVENT_TYPE_HEARTBEAT:
             self._heartbeat_checker.heartbeat_received()
-            additional_message = ""
-            if event.get(_ATTR_NAME_PUSH_METRICS, False) and self._push_metrics_handler:
-                additional_message = "(push_metrics)"
-                self._push_metrics_handler()
-            logger.info(f"heartbeat{additional_message}: {event.get('ts')}")
+            logger.info(f"heartbeat: {event.get('ts')}")
         elif event_type == _EVENT_TYPE_WELCOME:
             logger.info(f"{event_type}: agent_id={event.get(_ATTR_NAME_AGENT_ID)}")
         elif event_type == _EVENT_TYPE_WORK_AVAILABLE:

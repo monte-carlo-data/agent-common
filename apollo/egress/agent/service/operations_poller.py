@@ -11,6 +11,7 @@ piggybacked operations back to _ops_runner after pushing results.
 """
 
 import logging
+import time
 from threading import Condition, Thread
 from typing import Callable, Dict, Optional
 
@@ -63,6 +64,7 @@ class OperationsPoller:
         self._can_accept_work = can_accept_work
         self._condition = Condition()
         self._running = False
+        self._waiting = False
         self._thread: Optional[Thread] = None
 
     def start(self):
@@ -92,8 +94,12 @@ class OperationsPoller:
         Wakes up the poller to fetch immediately.
         """
         with self._condition:
+            poller_was_waiting = self._waiting
             self._condition.notify_all()
-        logger.debug("Notified of available work")
+        logger.info(
+            "Notified of available work",
+            extra={"poller_was_waiting": poller_was_waiting},
+        )
 
     def _run_loop(self):
         """Main polling loop: fetch operations and submit for execution."""
@@ -117,6 +123,7 @@ class OperationsPoller:
                 operation = self._fetch_operation()
 
             # No more work - wait for notification or timeout
+            logger.info("Fetch loop idle, entering wait")
             self._wait_for_work()
 
     def _submit_operation(self, operation: Dict):
@@ -150,9 +157,21 @@ class OperationsPoller:
     def _wait_for_work(self):
         """Wait for work_available notification or poll interval timeout."""
         with self._condition:
+            wait_start = time.monotonic()
+            self._waiting = True
             notified = self._condition.wait(timeout=self._poll_interval)
-            if not notified:
-                logger.debug(
+            self._waiting = False
+            wait_seconds = round(time.monotonic() - wait_start, 3)
+            if notified:
+                logger.info(
+                    "Woken by work_available notification",
+                    extra={"wait_seconds": wait_seconds},
+                )
+            else:
+                logger.info(
                     "Poll interval reached, checking for work",
-                    extra={"poll_interval_seconds": self._poll_interval},
+                    extra={
+                        "poll_interval_seconds": self._poll_interval,
+                        "wait_seconds": wait_seconds,
+                    },
                 )

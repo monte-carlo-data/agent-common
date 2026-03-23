@@ -64,12 +64,13 @@ class EventsClient:
         elif event_type == _EVENT_TYPE_WELCOME:
             logger.info(f"{event_type}: agent_id={event.get(_ATTR_NAME_AGENT_ID)}")
         elif event_type == _EVENT_TYPE_WORK_AVAILABLE:
-            logger.debug("work_available notification received")
+            logger.info("work_available notification received")
             if self._work_available_handler:
                 self._work_available_handler()
+            else:
+                logger.warning("work_available received but no handler registered")
         else:
-            # Log unexpected event types for debugging
-            logger.debug(f"Ignoring event type: {event_type}")
+            logger.info(f"Ignoring unexpected event type: {event_type}")
 
     def _receiver_connected(self):
         self._heartbeat_checker.start()

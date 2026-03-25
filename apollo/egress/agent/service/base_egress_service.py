@@ -19,7 +19,11 @@ from apollo.egress.agent.config.config_keys import (
     CONFIG_IS_REMOTE_UPGRADABLE,
     CONFIG_ACK_INTERVAL_SECONDS,
     CONFIG_PUSH_LOGS_INTERVAL_SECONDS,
+    CONFIG_SSE_NOTIFICATIONS_ENABLED,
+    CONFIG_METRICS_TIMER_ENABLED,
 )
+from apollo.egress.agent.service.operations_poller import OperationsPoller
+from apollo.egress.agent.service.metrics_timer import MetricsTimer
 from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
 from apollo.egress.agent.service.logs_service import BaseLogsService
 from apollo.egress.agent.service.metrics_service import BaseMetricsService
@@ -117,6 +121,7 @@ class BaseEgressAgentService(ABC):
         events_client: Optional[EventsClient] = None,
         ack_sender: Optional[AckSender] = None,
         logs_sender: Optional[TimerService] = None,
+        operations_poller: Optional[OperationsPoller] = None,
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
         skip_logs: bool = False,
@@ -163,16 +168,31 @@ class BaseEgressAgentService(ABC):
             enable_pre_signed_urls=enable_pre_signed_urls,
         )
 
+        self._backend_client = BackendClient(
+            backend_service_url=backend_service_url,
+            login_token_provider=self._login_token_provider,
+        )
+        self._sse_enabled = config_manager.get_bool_value(
+            CONFIG_SSE_NOTIFICATIONS_ENABLED, True
+        )
         self._events_client = events_client or EventsClient(
             receiver=SSEClientReceiver(
                 base_url=backend_service_url,
                 login_token_provider=self._login_token_provider,
             ),
         )
-        self._backend_client = BackendClient(
-            backend_service_url=backend_service_url,
-            login_token_provider=self._login_token_provider,
+        self._operations_poller = operations_poller or OperationsPoller(
+            backend_client=self._backend_client,
+            config_manager=config_manager,
+            operation_handler=self._handle_polled_operation,
+            can_accept_work=self._can_accept_work,
         )
+        self._metrics_timer = None
+        if config_manager.get_bool_value(CONFIG_METRICS_TIMER_ENABLED, False):
+            self._metrics_timer = MetricsTimer(
+                config_manager=config_manager,
+                push_metrics_handler=self._push_metrics,
+            )
         self._operations_mapping = [
             OperationMapping(
                 path="/api/v1/agent/execute/",
@@ -215,7 +235,14 @@ class BaseEgressAgentService(ABC):
     def start(self):
         self._ops_runner.start()
         self._results_publisher.start()
-        self._events_client.start(handler=self._event_handler)
+        self._operations_poller.start()
+        if self._metrics_timer:
+            self._metrics_timer.start()
+
+        if self._sse_enabled:
+            self._events_client.start(
+                work_available_handler=self._operations_poller.notify_work_available,
+            )
         self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
             self._logs_sender.start(handler=self._push_logs)
@@ -227,7 +254,11 @@ class BaseEgressAgentService(ABC):
     def stop(self):
         self._ops_runner.stop()
         self._results_publisher.stop()
-        self._events_client.stop()
+        self._operations_poller.stop()
+        if self._metrics_timer:
+            self._metrics_timer.stop()
+        if self._sse_enabled:
+            self._events_client.stop()
         self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
@@ -268,22 +299,33 @@ class BaseEgressAgentService(ABC):
     def _get_build_number(self) -> str:
         raise NotImplementedError
 
-    def _event_handler(self, event: Dict[str, Any]):
+    def _can_accept_work(self) -> bool:
+        """Check if ops_runner can accept more work (backpressure control)."""
+        queue_depth = self._ops_runner.queue_depth()
+        max_depth = self._ops_runner.thread_count
+        can_accept = queue_depth < max_depth
+        if not can_accept:
+            logger.debug(
+                f"Backpressure active: queue_depth={queue_depth}, max={max_depth}"
+            )
+        return can_accept
+
+    def _handle_polled_operation(
+        self, path: str, operation_id: str, operation: Dict[str, Any]
+    ):
         """
-        Invoked by events client when an event is received with an agent operation to run
+        Invoked by operations poller when an operation is fetched.
+        Schedules ACK and executes via existing async flow.
         """
-        operation_id = event.get(ATTR_NAME_OPERATION_ID)
-        if operation_id:
-            path: str = event.get(ATTR_NAME_PATH, "")
-            if path:
-                logger.info(
-                    f"Received agent operation: {path}, operation_id: {operation_id}"
-                )
-                self._ack_sender.schedule_ack(operation_id)
-                self._execute_operation(path, operation_id, event)
-        elif op_type := (event.get(ATTR_NAME_OPERATION_TYPE)):
-            if op_type == _ATTR_OPERATION_TYPE_PUSH_METRICS:
-                self._push_metrics()
+        logger.info(
+            f"Processing polled operation: {path}, operation_id: {operation_id}"
+        )
+
+        # Schedule ACK (same as push model)
+        self._ack_sender.schedule_ack(operation_id)
+
+        # Execute via existing async flow (ops_runner -> results_publisher)
+        self._execute_operation(path, operation_id, operation)
 
     def _execute_operation(self, path: str, operation_id: str, event: Dict[str, Any]):
         operation = event.get(ATTR_NAME_OPERATION, {})
@@ -460,7 +502,30 @@ class BaseEgressAgentService(ABC):
             if ATTR_NAME_TRACE_ID not in result:
                 result[ATTRIBUTE_NAME_TRACE_ID] = operation_attrs.trace_id
             result = self._results_processor.process_result(result, operation_attrs)
-        self._backend_client.push_results(operation_id, result)
+        response = self._backend_client.push_results(operation_id, result)
+
+        # Handle piggybacked operation from orchestrator
+        if response and (next_op := response.get("next_operation")):
+            self._handle_piggybacked_operation(next_op)
+
+    def _handle_piggybacked_operation(self, operation: Dict[str, Any]):
+        """Process a piggybacked operation received from push_results response."""
+        path = operation.get(ATTR_NAME_PATH, "")
+        operation_id = operation.get(ATTR_NAME_OPERATION_ID)
+
+        if not path or not operation_id:
+            logger.warning(f"Invalid piggybacked operation: {operation}")
+            return
+
+        logger.info(
+            f"Received piggybacked operation: {path}, operation_id: {operation_id}"
+        )
+
+        # Schedule ACK (same as push model)
+        self._ack_sender.schedule_ack(operation_id)
+
+        # Execute via existing flow
+        self._execute_operation(path, operation_id, operation)
 
     def _result_for_exception(self, ex: Exception) -> Dict:
         result: Dict[str, Any] = {

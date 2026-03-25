@@ -26,18 +26,23 @@ class BackendClient:
         self._backend_service_url = backend_service_url
         self._login_token_provider = login_token_provider
 
-    def push_results(self, operation_id: str, result: Dict[str, Any]):
+    def push_results(
+        self, operation_id: str, result: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """
-        Pushes the result for a given operation, please note results are sent by a separate thread.
-        See `ResultsPublisher` for more information.
+        Pushes the result for a given operation.
+        Returns response dict which may include 'next_operation' for piggybacking.
         """
         try:
-            self._push_results_with_retries(operation_id, result)
+            return self._push_results_with_retries(operation_id, result)
         except Exception as ex:
             logger.error(f"Failed to push results to backend: {ex}")
+            return None
 
     @retry(tries=3, delay=1, backoff=2)
-    def _push_results_with_retries(self, operation_id: str, result: Dict[str, Any]):
+    def _push_results_with_retries(
+        self, operation_id: str, result: Dict[str, Any]
+    ) -> Dict[str, Any]:
         logger.info(f"Sending query results to backend, operation_id: {operation_id}")
         results_url = urljoin(
             self._backend_service_url, f"/api/v1/agent/operations/{operation_id}/result"
@@ -57,9 +62,11 @@ class BackendClient:
             },
             timeout=60,
         )
+        response.raise_for_status()
         logger.info(
             f"Sent query results to backend, operation_id: {operation_id}, response: {response.status_code}"
         )
+        return response.json()
 
     def execute_operation(
         self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
@@ -109,3 +116,20 @@ class BackendClient:
                 f"Failed to download operation {operation_id}: {error_message}"
             )
         return operation
+
+    def get_next_operation(self) -> Optional[Dict[str, Any]]:
+        """
+        Fetch next operation from orchestrator queue.
+        Used by the pull model where agents poll for work.
+        Returns None if no operations are available.
+        """
+        url = urljoin(self._backend_service_url, "/api/v1/agent/operation")
+        response = requests.get(
+            url,
+            headers=self._login_token_provider.get_token(),
+            timeout=30,
+        )
+        if response.status_code == 204:
+            return None
+        response.raise_for_status()
+        return response.json()

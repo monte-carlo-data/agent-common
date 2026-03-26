@@ -3,7 +3,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Tuple, Optional, Any, Callable, List
+from typing import Dict, Optional, Any, Callable, List
 
 from apollo.egress.agent.backend.backend_client import BackendClient
 from apollo.egress.agent.events.ack_sender import (
@@ -88,7 +88,6 @@ class OperationMatchingType(Enum):
 class OperationMapping:
     path: str
     method: Callable[[str, Dict[str, Any]], None]
-    schedule: bool = False
     matching_type: OperationMatchingType = OperationMatchingType.EQUALS
 
 
@@ -100,10 +99,9 @@ class BaseEgressAgentService(ABC):
     By default, operations are received from the MC backend using a SSE (Server-sent events)
     connection, but new implementations (polling, gRPC, websockets, etc.) can be implemented by
     adding new "receivers" (see ReceiverFactory and BaseReceiver).
-    Operations are processed by a pool of background threads (see OperationsRunner) and executed
-    asynchronously.
-    When the result is ready we send it to the MC backend using another background thread (see
-    ResultsPublisher).
+    Operations are always processed asynchronously by a pool of background threads (see
+    OperationsRunner). When the result is ready we send it to the MC backend using another
+    background thread (see ResultsPublisher).
     """
 
     def __init__(
@@ -198,22 +196,18 @@ class BaseEgressAgentService(ABC):
                 path="/api/v1/agent/execute/",
                 matching_type=OperationMatchingType.STARTS_WITH,
                 method=self._execute_agent_operation,
-                schedule=True,
             ),
             OperationMapping(
                 path="/api/v1/test/health",
                 method=self._execute_health,
-                schedule=True,
             ),
             OperationMapping(
                 path="/api/v1/agent/metrics",
                 method=self._execute_get_metrics,
-                schedule=True,
             ),
             OperationMapping(
                 path=_PATH_PUSH_METRICS,
                 method=self._execute_push_metrics,
-                schedule=True,
             ),
         ]
         if not skip_logs:
@@ -222,12 +216,10 @@ class BaseEgressAgentService(ABC):
                     OperationMapping(
                         path="/api/v1/agent/logs",
                         method=self._execute_get_logs,
-                        schedule=True,
                     ),
                     OperationMapping(
                         path=_PATH_PUSH_LOGS,
                         method=self._execute_push_logs,
-                        schedule=True,
                     ),
                 ]
             )
@@ -335,28 +327,22 @@ class BaseEgressAgentService(ABC):
                 operation_id
             )
 
-        method, schedule = self._resolve_operation_method(path)
-        if schedule:
-            self._schedule_operation(operation_id, event)
-        elif method:
-            method(operation_id, event)
-        else:
-            logger.error(f"Invalid path received: {path}, operation_id: {operation_id}")
+        self._schedule_operation(operation_id, event)
 
     def _resolve_operation_method(
         self,
         path: str,
-    ) -> Tuple[Optional[Callable[[str, Dict[str, Any]], None]], bool]:
+    ) -> Optional[Callable[[str, Dict[str, Any]], None]]:
         for op in self._operations_mapping:
             if op.matching_type == OperationMatchingType.EQUALS:
                 if path == op.path:
-                    return op.method, op.schedule
+                    return op.method
             elif op.matching_type == OperationMatchingType.STARTS_WITH:
                 if path.startswith(op.path):
-                    return op.method, op.schedule
+                    return op.method
             else:
                 raise ValueError(f"Invalid matching type: {op.matching_type}")
-        return None, False
+        return None
 
     def _execute_agent_operation(self, operation_id: str, event: Dict[str, Any]):
         try:
@@ -385,7 +371,7 @@ class BaseEgressAgentService(ABC):
         self._ops_runner.schedule(Operation(operation_id, event))
 
     def _execute_scheduled_operation(self, op: Operation):
-        method, _ = self._resolve_operation_method(op.event.get(ATTR_NAME_PATH, ""))
+        method = self._resolve_operation_method(op.event.get(ATTR_NAME_PATH, ""))
         if method:
             method(op.operation_id, op.event)
         else:

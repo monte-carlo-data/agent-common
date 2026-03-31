@@ -116,6 +116,16 @@ class BackendClient:
             )
         return operation
 
+    def send_heartbeat(self):
+        """Send a liveness heartbeat to the orchestrator."""
+        url = urljoin(self._backend_service_url, "/api/v1/agent/heartbeat")
+        response = requests.post(
+            url,
+            headers=self._login_token_provider.get_token(),
+            timeout=10,
+        )
+        response.raise_for_status()
+
     def notify_shutdown(self):
         """Notify orchestrator that this agent is shutting down. Best-effort."""
         url = urljoin(self._backend_service_url, "/api/v1/agent/shutdown")

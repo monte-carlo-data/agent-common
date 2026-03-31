@@ -107,6 +107,7 @@ class OperationsPoller:
             # Check backpressure - wait if ops_runner queue is full
             if self._can_accept_work and not self._can_accept_work():
                 logger.debug("Backpressure: waiting for ops_runner capacity")
+                self._send_heartbeat()
                 self._wait_for_work()
                 continue
 
@@ -139,6 +140,13 @@ class OperationsPoller:
             f"Submitting polled operation: {path}, operation_id: {operation_id}"
         )
         self._operation_handler(path, operation_id, operation)
+
+    def _send_heartbeat(self):
+        """Send a heartbeat to the orchestrator to signal liveness during backpressure."""
+        try:
+            self._backend_client.send_heartbeat()
+        except Exception:
+            logger.exception("Failed to send heartbeat")
 
     def _fetch_operation(self) -> Optional[Dict]:
         """Fetch next operation from orchestrator. Returns None if queue empty or on error."""

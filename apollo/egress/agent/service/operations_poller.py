@@ -162,12 +162,12 @@ class OperationsPoller:
             notified = self._condition.wait(timeout=self._poll_interval)
             self._waiting = False
             wait_seconds = round(time.monotonic() - wait_start, 3)
-            if notified:
+            if notified and self._running:
                 logger.info(
                     "Woken by work_available notification",
                     extra={"wait_seconds": wait_seconds},
                 )
-            else:
+            elif not notified:
                 logger.info(
                     "Poll interval reached, checking for work",
                     extra={

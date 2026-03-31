@@ -65,13 +65,49 @@ class EventsClientTests(TestCase):
         # Operation events should be ignored - pull model handles operations
         self._work_available_handler.assert_not_called()
 
+    def test_goodbye_event_calls_handler(self):
+        """Test that goodbye event calls the goodbye handler with the reason."""
+        goodbye_handler = Mock()
+        self._client.start(
+            work_available_handler=self._work_available_handler,
+            goodbye_handler=goodbye_handler,
+        )
+
+        self._client._event_received({"type": "goodbye", "reason": "activity_timeout"})
+
+        goodbye_handler.assert_called_once_with("activity_timeout")
+        self._work_available_handler.assert_not_called()
+
+    def test_goodbye_event_defaults_reason_to_unknown(self):
+        """Test that goodbye event without reason defaults to 'unknown'."""
+        goodbye_handler = Mock()
+        self._client.start(
+            work_available_handler=self._work_available_handler,
+            goodbye_handler=goodbye_handler,
+        )
+
+        self._client._event_received({"type": "goodbye"})
+
+        goodbye_handler.assert_called_once_with("unknown")
+
+    def test_goodbye_event_without_handler(self):
+        """Test that goodbye event without handler doesn't raise."""
+        self._client.start(
+            work_available_handler=self._work_available_handler,
+        )
+
+        # Should not raise
+        self._client._event_received({"type": "goodbye", "reason": "activity_timeout"})
+
     def test_stop_clears_handlers(self):
         """Test that stop() clears the handlers."""
         self._client.start(
             work_available_handler=self._work_available_handler,
+            goodbye_handler=Mock(),
         )
 
         self._client.stop()
 
         self.assertIsNone(self._client._work_available_handler)
+        self.assertIsNone(self._client._goodbye_handler)
         self._receiver.stop.assert_called_once()

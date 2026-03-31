@@ -234,6 +234,7 @@ class BaseEgressAgentService(ABC):
         if self._sse_enabled:
             self._events_client.start(
                 work_available_handler=self._operations_poller.notify_work_available,
+                goodbye_handler=self._handle_goodbye,
             )
         self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
@@ -254,6 +255,11 @@ class BaseEgressAgentService(ABC):
         self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
+
+    def _handle_goodbye(self, reason: str):
+        """Handle goodbye event from orchestrator — trigger graceful shutdown."""
+        logger.warning(f"Orchestrator requested shutdown: {reason}")
+        self.stop()
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(

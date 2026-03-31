@@ -116,6 +116,16 @@ class BackendClient:
             )
         return operation
 
+    def notify_shutdown(self):
+        """Notify orchestrator that this agent is shutting down. Best-effort."""
+        url = urljoin(self._backend_service_url, "/api/v1/agent/shutdown")
+        response = requests.post(
+            url,
+            headers=self._login_token_provider.get_token(),
+            timeout=5,
+        )
+        response.raise_for_status()
+
     def get_next_operation(self) -> Optional[Dict[str, Any]]:
         """
         Fetch next operation from orchestrator queue.

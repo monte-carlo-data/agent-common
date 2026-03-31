@@ -1,4 +1,7 @@
 import logging
+import os
+import signal
+import sys
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -259,7 +262,33 @@ class BaseEgressAgentService(ABC):
     def _handle_goodbye(self, reason: str):
         """Handle goodbye event from orchestrator — trigger graceful shutdown."""
         logger.warning(f"Orchestrator requested shutdown: {reason}")
+        self._trigger_graceful_shutdown()
+
+    def _trigger_graceful_shutdown(self):
+        """Notify orchestrator, stop all threads, and exit the process."""
+        try:
+            self._backend_client.notify_shutdown()
+            logger.info("Notified orchestrator of shutdown")
+        except Exception:
+            logger.exception("Failed to notify orchestrator of shutdown")
         self.stop()
+        sys.exit(0)
+
+    def register_signal_handlers(self):
+        """Register SIGTERM and SIGINT handlers for graceful shutdown.
+
+        Should be called from the main thread after start(). Signal handlers
+        can only be registered from the main thread.
+        """
+
+        def _signal_handler(signum: int, frame: Any):
+            sig_name = signal.Signals(signum).name
+            logger.info(f"Received {sig_name}, shutting down")
+            self._trigger_graceful_shutdown()
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+        logger.info("Registered SIGTERM and SIGINT signal handlers")
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(

@@ -55,7 +55,9 @@ class SSEClientReceiver(BaseReceiver):
         # enough
         loop_id = str(uuid4())
         self._current_loop_id = loop_id
-        th = Thread(target=self._run_receiver, args=(loop_id,))
+        # Daemon thread so it doesn't block process exit — the SSE network read
+        # can't be interrupted cleanly, and all other cleanup is done before exit.
+        th = Thread(target=self._run_receiver, args=(loop_id,), daemon=True)
         th.start()
 
     def stop(self):

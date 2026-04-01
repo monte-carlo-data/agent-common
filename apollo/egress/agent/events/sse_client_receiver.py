@@ -113,5 +113,5 @@ class SSEClientReceiver(BaseReceiver):
             if self._is_current_loop(loop_id):
                 raise SSEConnectionFailed(str(ex)) from ex
         finally:
-            if self._disconnected_handler:
+            if self._disconnected_handler and self._is_current_loop(loop_id):
                 self._disconnected_handler()

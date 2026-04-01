@@ -194,6 +194,7 @@ class BaseEgressAgentService(ABC):
                 config_manager=config_manager,
                 push_metrics_handler=self._push_metrics,
             )
+        self._shutting_down = False
         self._operations_mapping = [
             OperationMapping(
                 path="/api/v1/agent/execute/",
@@ -265,14 +266,23 @@ class BaseEgressAgentService(ABC):
         self._trigger_graceful_shutdown()
 
     def _trigger_graceful_shutdown(self):
-        """Notify orchestrator, stop all threads, and exit the process."""
+        """Notify orchestrator, stop all threads, and signal the main thread to exit.
+
+        Safe to call from any thread. Cleanup runs exactly once (guarded by
+        _shutting_down flag). After cleanup, sends SIGTERM to the main thread
+        which triggers the signal handler to call sys.exit(0).
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
         try:
             self._backend_client.notify_shutdown()
             logger.info("Notified orchestrator of shutdown")
         except Exception:
             logger.exception("Failed to notify orchestrator of shutdown")
         self.stop()
-        sys.exit(0)
+        logger.info("Shutdown complete, signaling main thread to exit")
+        os.kill(os.getpid(), signal.SIGTERM)
 
     def register_signal_handlers(self):
         """Register SIGTERM and SIGINT handlers for graceful shutdown.
@@ -284,7 +294,9 @@ class BaseEgressAgentService(ABC):
         def _signal_handler(signum: int, frame: Any):
             sig_name = signal.Signals(signum).name
             logger.info(f"Received {sig_name}, shutting down")
-            self._trigger_graceful_shutdown()
+            if not self._shutting_down:
+                self._trigger_graceful_shutdown()
+            sys.exit(0)
 
         signal.signal(signal.SIGTERM, _signal_handler)
         signal.signal(signal.SIGINT, _signal_handler)

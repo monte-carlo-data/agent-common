@@ -1,3 +1,5 @@
+import signal
+
 from unittest import TestCase
 from unittest.mock import Mock, patch, MagicMock
 
@@ -265,17 +267,17 @@ class BaseEgressServiceTests(TestCase):
 
         self.assertFalse(result)
 
-    @patch("apollo.egress.agent.service.base_egress_service.sys")
-    def test_handle_goodbye_triggers_graceful_shutdown(self, mock_sys):
-        """Test that _handle_goodbye notifies orchestrator, stops, and exits."""
+    @patch("apollo.egress.agent.service.base_egress_service.os")
+    def test_handle_goodbye_triggers_graceful_shutdown(self, mock_os):
+        """Test that _handle_goodbye notifies orchestrator, stops, and signals main thread."""
         self._service._handle_goodbye("activity_timeout")
 
         self._backend_client.notify_shutdown.assert_called_once()
         self._operations_poller.stop.assert_called_once()
-        mock_sys.exit.assert_called_once_with(0)
+        mock_os.kill.assert_called_once_with(mock_os.getpid(), signal.SIGTERM)
 
-    @patch("apollo.egress.agent.service.base_egress_service.sys")
-    def test_trigger_graceful_shutdown_continues_on_notify_failure(self, mock_sys):
+    @patch("apollo.egress.agent.service.base_egress_service.os")
+    def test_trigger_graceful_shutdown_continues_on_notify_failure(self, mock_os):
         """Test that shutdown continues even if notify_shutdown fails."""
         self._backend_client.notify_shutdown.side_effect = Exception(
             "connection refused"
@@ -283,12 +285,21 @@ class BaseEgressServiceTests(TestCase):
 
         self._service._trigger_graceful_shutdown()
 
-        # stop and exit still called despite notify failure
+        # stop and signal still called despite notify failure
         self._operations_poller.stop.assert_called_once()
-        mock_sys.exit.assert_called_once_with(0)
+        mock_os.kill.assert_called_once_with(mock_os.getpid(), signal.SIGTERM)
 
-    @patch("apollo.egress.agent.service.base_egress_service.sys")
-    def test_start_passes_goodbye_handler_to_events_client(self, mock_sys):
+    @patch("apollo.egress.agent.service.base_egress_service.os")
+    def test_trigger_graceful_shutdown_only_runs_once(self, mock_os):
+        """Test that _trigger_graceful_shutdown is guarded against double execution."""
+        self._service._trigger_graceful_shutdown()
+        self._service._trigger_graceful_shutdown()
+
+        # notify and stop called only once
+        self._backend_client.notify_shutdown.assert_called_once()
+        self._operations_poller.stop.assert_called_once()
+
+    def test_start_passes_goodbye_handler_to_events_client(self):
         """Test that start() passes goodbye_handler to EventsClient."""
         self._service._sse_enabled = True
 

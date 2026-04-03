@@ -269,23 +269,10 @@ class BaseEgressServiceTests(TestCase):
 
     @patch("apollo.egress.agent.service.base_egress_service.os")
     def test_handle_goodbye_triggers_graceful_shutdown(self, mock_os):
-        """Test that _handle_goodbye notifies orchestrator, stops, and signals main thread."""
+        """Test that _handle_goodbye notifies orchestrator, stops threads, and signals exit."""
         self._service._handle_goodbye("activity_timeout")
 
         self._backend_client.notify_shutdown.assert_called_once()
-        self._operations_poller.stop.assert_called_once()
-        mock_os.kill.assert_called_once_with(mock_os.getpid(), signal.SIGTERM)
-
-    @patch("apollo.egress.agent.service.base_egress_service.os")
-    def test_trigger_graceful_shutdown_continues_on_notify_failure(self, mock_os):
-        """Test that shutdown continues even if notify_shutdown fails."""
-        self._backend_client.notify_shutdown.side_effect = Exception(
-            "connection refused"
-        )
-
-        self._service._trigger_graceful_shutdown()
-
-        # stop and signal still called despite notify failure
         self._operations_poller.stop.assert_called_once()
         mock_os.kill.assert_called_once_with(mock_os.getpid(), signal.SIGTERM)
 

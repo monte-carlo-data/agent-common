@@ -269,8 +269,8 @@ class BaseEgressAgentService(ABC):
         """Notify orchestrator, stop all threads, and terminate the process.
 
         Safe to call from any thread. Cleanup runs exactly once (guarded by
-        _shutting_down flag). After cleanup, sends SIGTERM to the process group
-        which triggers the signal handler to call sys.exit(0).
+        _shutting_down flag). In-flight operations are abandoned — the
+        orchestrator requeues them via the shutdown notification.
         """
         if self._shutting_down:
             return

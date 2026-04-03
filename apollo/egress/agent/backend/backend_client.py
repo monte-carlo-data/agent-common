@@ -132,7 +132,7 @@ class BackendClient:
         response = requests.post(
             url,
             headers=self._login_token_provider.get_token(),
-            timeout=5,
+            timeout=15,
         )
         response.raise_for_status()
 

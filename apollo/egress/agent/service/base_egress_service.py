@@ -266,10 +266,10 @@ class BaseEgressAgentService(ABC):
         self._trigger_graceful_shutdown()
 
     def _trigger_graceful_shutdown(self):
-        """Notify orchestrator, stop all threads, and signal the main thread to exit.
+        """Notify orchestrator, stop all threads, and terminate the process.
 
         Safe to call from any thread. Cleanup runs exactly once (guarded by
-        _shutting_down flag). After cleanup, sends SIGTERM to the main thread
+        _shutting_down flag). After cleanup, sends SIGTERM to the process group
         which triggers the signal handler to call sys.exit(0).
         """
         if self._shutting_down:
@@ -281,8 +281,14 @@ class BaseEgressAgentService(ABC):
         except Exception:
             logger.exception("Failed to notify orchestrator of shutdown")
         self.stop()
-        logger.info("Shutdown complete, signaling main thread to exit")
-        os.kill(os.getpid(), signal.SIGTERM)
+        logger.info("Shutdown complete, signaling exit")
+        # When running under gunicorn, signal the master process so all workers
+        # shut down — not just the one that received the goodbye event. When
+        # running standalone (local dev, single process), signal just ourselves.
+        if "gunicorn" in sys.modules:
+            os.kill(os.getppid(), signal.SIGTERM)
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
 
     def register_signal_handlers(self):
         """Register SIGTERM and SIGINT handlers for graceful shutdown.

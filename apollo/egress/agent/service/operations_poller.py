@@ -106,7 +106,7 @@ class OperationsPoller:
         while self._running:
             # Check backpressure - wait if ops_runner queue is full
             if self._can_accept_work and not self._can_accept_work():
-                logger.info("Backpressure: waiting for ops_runner capacity")
+                logger.debug("Backpressure: waiting for ops_runner capacity")
                 self._send_heartbeat()
                 self._wait_for_work()
                 continue

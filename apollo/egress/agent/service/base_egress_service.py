@@ -306,13 +306,6 @@ class BaseEgressAgentService(ABC):
 
         signal.signal(signal.SIGTERM, _signal_handler)
         signal.signal(signal.SIGINT, _signal_handler)
-        # Restore siginterrupt behavior after registering handlers.
-        # signal.signal() resets siginterrupt to True (interruptible), which
-        # causes SIGTERM to interrupt blocking system calls like the SSE socket
-        # read. Setting it to False prevents signals from disrupting active
-        # network connections — matching gunicorn's default behavior.
-        signal.siginterrupt(signal.SIGTERM, False)
-        signal.siginterrupt(signal.SIGINT, False)
         logger.info("Registered SIGTERM and SIGINT signal handlers")
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:

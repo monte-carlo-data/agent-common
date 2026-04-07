@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, Callable, List
 
-from apollo.egress.agent.backend.backend_client import BackendClient
+from apollo.egress.agent.backend.backend_client import BackendClient, INSTANCE_ID_HEADER
 from apollo.egress.agent.events.ack_sender import (
     AckSender,
     DEFAULT_ACK_INTERVAL_SECONDS,
@@ -180,6 +180,7 @@ class BaseEgressAgentService(ABC):
             receiver=SSEClientReceiver(
                 base_url=backend_service_url,
                 login_token_provider=self._login_token_provider,
+                extra_headers={INSTANCE_ID_HEADER: self._backend_client.instance_id},
             ),
         )
         self._operations_poller = operations_poller or OperationsPoller(
@@ -245,7 +246,8 @@ class BaseEgressAgentService(ABC):
             self._logs_sender.start(handler=self._push_logs)
 
         logger.info(
-            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()})"
+            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()}), "
+            f"instance_id={self._backend_client.instance_id}"
         )
 
     def stop(self):

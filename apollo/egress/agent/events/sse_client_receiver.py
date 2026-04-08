@@ -113,5 +113,8 @@ class SSEClientReceiver(BaseReceiver):
             if self._is_current_loop(loop_id):
                 raise SSEConnectionFailed(str(ex)) from ex
         finally:
-            if self._disconnected_handler:
+            # Call disconnected handler if this is still the active loop or was
+            # explicitly stopped (None). Skip if replaced by restart() (different UUID)
+            # to avoid stopping the new loop's heartbeat checker.
+            if self._disconnected_handler and self._current_loop_id in (loop_id, None):
                 self._disconnected_handler()

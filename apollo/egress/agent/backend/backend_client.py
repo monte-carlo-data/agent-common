@@ -1,14 +1,13 @@
 import json
 import logging
 from typing import Dict, Any, Optional
-from urllib.parse import urljoin
-
 import requests
 from retry import retry
 
 from apollo.common.agent.serde import AgentSerializer
 
 from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
+from apollo.egress.agent.utils.utils import build_url
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ class BackendClient:
         self, operation_id: str, result: Dict[str, Any]
     ) -> Dict[str, Any]:
         logger.info(f"Sending query results to backend, operation_id: {operation_id}")
-        results_url = urljoin(
+        results_url = build_url(
             self._backend_service_url, f"/api/v1/agent/operations/{operation_id}/result"
         )
         result_str = json.dumps(
@@ -81,7 +80,7 @@ class BackendClient:
         Performs an operation on the backend service. For example `ping`.
         """
         try:
-            url = urljoin(self._backend_service_url, path)
+            url = build_url(self._backend_service_url, path)
             headers = self._login_token_provider.get_token()
             if body:
                 headers["Content-Type"] = "application/json"
@@ -123,7 +122,7 @@ class BackendClient:
         Used by the pull model where agents poll for work.
         Returns None if no operations are available.
         """
-        url = urljoin(self._backend_service_url, "/api/v1/agent/operation")
+        url = build_url(self._backend_service_url, "/api/v1/agent/operation")
         response = requests.get(
             url,
             headers=self._login_token_provider.get_token(),

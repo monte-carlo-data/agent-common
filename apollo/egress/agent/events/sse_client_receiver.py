@@ -2,7 +2,6 @@ import json
 import logging
 from threading import Thread
 from typing import Callable, Dict, Optional
-from urllib.parse import urljoin
 from uuid import uuid4
 
 import sseclient
@@ -10,7 +9,7 @@ from retry import retry
 
 from apollo.egress.agent.events.base_receiver import BaseReceiver
 from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
-from apollo.egress.agent.utils.utils import X_MCD_ID
+from apollo.egress.agent.utils.utils import X_MCD_ID, build_url
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ class SSEClientReceiver(BaseReceiver):
             mc_login_token = self._login_token_provider.get_token()
             token_id = mc_login_token.get(X_MCD_ID)
             logger.info(f"Connecting SSE Client, using token ID={token_id} ...")
-            url = urljoin(self._base_url, "/stream")
+            url = build_url(self._base_url, "/stream")
             headers = {
                 "Accept": "text/event-stream",
                 **mc_login_token,

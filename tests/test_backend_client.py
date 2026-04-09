@@ -94,6 +94,25 @@ class BackendClientURLTests(TestCase):
         )
 
     @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_handles_path_without_leading_slash(
+        self, mock_request: Mock
+    ):
+        mock_request.return_value = Mock(status_code=200)
+        mock_request.return_value.json.return_value = {"ok": True}
+        client = BackendClient(
+            backend_service_url="http://server/custom-path",
+            login_token_provider=self._login_token_provider,
+        )
+
+        client.execute_operation("api/v1/test/ping")
+
+        called_url = mock_request.call_args[1]["url"]
+        self.assertEqual(
+            "http://server/custom-path/api/v1/test/ping",
+            called_url,
+        )
+
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
     def test_download_operation_preserves_base_url_path(self, mock_request: Mock):
         mock_request.return_value = Mock(status_code=200)
         mock_request.return_value.json.return_value = {"operation": "data"}

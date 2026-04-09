@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 def build_url(base_url: str, path: str) -> str:
     """Concatenate a base URL with a path, preserving the base URL's path component."""
+    if not path.startswith("/"):
+        path = "/" + path
     return base_url.rstrip("/") + path
 
 

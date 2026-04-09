@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -195,7 +196,7 @@ class BaseEgressAgentService(ABC):
                 config_manager=config_manager,
                 push_metrics_handler=self._push_metrics,
             )
-        self._shutting_down = False
+        self._shutdown_lock = threading.Lock()
         self._operations_mapping = [
             OperationMapping(
                 path="/api/v1/agent/execute/",
@@ -271,12 +272,11 @@ class BaseEgressAgentService(ABC):
         """Notify orchestrator, stop all threads, and terminate the process.
 
         Safe to call from any thread. Cleanup runs exactly once (guarded by
-        _shutting_down flag). In-flight operations are abandoned — the
-        orchestrator requeues them via the shutdown notification.
+        _shutdown_lock). In-flight operations are abandoned — the orchestrator
+        requeues them via the shutdown notification.
         """
-        if self._shutting_down:
+        if not self._shutdown_lock.acquire(blocking=False):
             return
-        self._shutting_down = True
         try:
             self._backend_client.notify_shutdown()
             logger.info("Notified orchestrator of shutdown")
@@ -302,8 +302,7 @@ class BaseEgressAgentService(ABC):
         def _signal_handler(signum: int, frame: Any):
             sig_name = signal.Signals(signum).name
             logger.info(f"Received {sig_name}, shutting down")
-            if not self._shutting_down:
-                self._trigger_graceful_shutdown()
+            self._trigger_graceful_shutdown()
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, _signal_handler)

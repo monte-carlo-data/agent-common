@@ -25,3 +25,11 @@ CONFIG_PUSH_LOGS_INTERVAL_SECONDS = "PUSH_LOGS_INTERVAL_SECONDS"
 CONFIG_WAREHOUSE_NAME = "WAREHOUSE_NAME"
 # JSON string with job types configuration mapping job types to warehouses and configuring pool size
 CONFIG_JOB_TYPES = "JOB_TYPES"
+# interval in seconds between polling for operations when idle
+CONFIG_POLL_INTERVAL_SECONDS = "POLL_INTERVAL_SECONDS"
+# whether SSE notifications are enabled (if False, agent uses polling only)
+CONFIG_SSE_NOTIFICATIONS_ENABLED = "SSE_NOTIFICATIONS_ENABLED"
+# whether the metrics timer is enabled
+CONFIG_METRICS_TIMER_ENABLED = "METRICS_TIMER_ENABLED"
+# interval in seconds between metrics pushes (only used if metrics timer is enabled)
+CONFIG_METRICS_PUSH_INTERVAL_SECONDS = "METRICS_PUSH_INTERVAL_SECONDS"

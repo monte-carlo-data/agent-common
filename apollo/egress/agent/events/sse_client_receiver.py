@@ -2,7 +2,6 @@ import json
 import logging
 from threading import Thread
 from typing import Callable, Dict, Optional
-from urllib.parse import urljoin
 from uuid import uuid4
 
 import sseclient
@@ -10,7 +9,7 @@ from retry import retry
 
 from apollo.egress.agent.events.base_receiver import BaseReceiver
 from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
-from apollo.egress.agent.utils.utils import X_MCD_ID
+from apollo.egress.agent.utils.utils import X_MCD_ID, build_url
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ class SSEClientReceiver(BaseReceiver):
             mc_login_token = self._login_token_provider.get_token()
             token_id = mc_login_token.get(X_MCD_ID)
             logger.info(f"Connecting SSE Client, using token ID={token_id} ...")
-            url = urljoin(self._base_url, "/stream")
+            url = build_url(self._base_url, "/stream")
             headers = {
                 "Accept": "text/event-stream",
                 **mc_login_token,
@@ -113,5 +112,8 @@ class SSEClientReceiver(BaseReceiver):
             if self._is_current_loop(loop_id):
                 raise SSEConnectionFailed(str(ex)) from ex
         finally:
-            if self._disconnected_handler:
+            # Call disconnected handler if this is still the active loop or was
+            # explicitly stopped (None). Skip if replaced by restart() (different UUID)
+            # to avoid stopping the new loop's heartbeat checker.
+            if self._disconnected_handler and self._current_loop_id in (loop_id, None):
                 self._disconnected_handler()

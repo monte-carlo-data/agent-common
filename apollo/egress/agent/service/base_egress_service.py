@@ -1,11 +1,15 @@
 import logging
+import os
+import signal
+import sys
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, Callable, List
 
-from apollo.egress.agent.backend.backend_client import BackendClient
+from apollo.egress.agent.backend.backend_client import BackendClient, INSTANCE_ID_HEADER
 from apollo.egress.agent.events.ack_sender import (
     AckSender,
     DEFAULT_ACK_INTERVAL_SECONDS,
@@ -177,6 +181,7 @@ class BaseEgressAgentService(ABC):
             receiver=SSEClientReceiver(
                 base_url=backend_service_url,
                 login_token_provider=self._login_token_provider,
+                extra_headers={INSTANCE_ID_HEADER: self._backend_client.instance_id},
             ),
         )
         self._operations_poller = operations_poller or OperationsPoller(
@@ -191,6 +196,7 @@ class BaseEgressAgentService(ABC):
                 config_manager=config_manager,
                 push_metrics_handler=self._push_metrics,
             )
+        self._shutdown_lock = threading.Lock()
         self._operations_mapping = [
             OperationMapping(
                 path="/api/v1/agent/execute/",
@@ -234,13 +240,15 @@ class BaseEgressAgentService(ABC):
         if self._sse_enabled:
             self._events_client.start(
                 work_available_handler=self._operations_poller.notify_work_available,
+                goodbye_handler=self._handle_goodbye,
             )
         self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
             self._logs_sender.start(handler=self._push_logs)
 
         logger.info(
-            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()})"
+            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()}), "
+            f"instance_id={self._backend_client.instance_id}"
         )
 
     def stop(self):
@@ -254,6 +262,52 @@ class BaseEgressAgentService(ABC):
         self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
+
+    def _handle_goodbye(self, reason: str):
+        """Handle goodbye event from orchestrator — trigger graceful shutdown."""
+        logger.warning(f"Orchestrator requested shutdown: {reason}")
+        self._trigger_graceful_shutdown()
+
+    def _trigger_graceful_shutdown(self):
+        """Notify orchestrator, stop all threads, and terminate the process.
+
+        Safe to call from any thread. Cleanup runs exactly once (guarded by
+        _shutdown_lock). In-flight operations are abandoned — the orchestrator
+        requeues them via the shutdown notification.
+        """
+        if not self._shutdown_lock.acquire(blocking=False):
+            return
+        try:
+            self._backend_client.notify_shutdown()
+            logger.info("Notified orchestrator of shutdown")
+        except Exception:
+            logger.exception("Failed to notify orchestrator of shutdown")
+        self.stop()
+        logger.info("Shutdown complete, signaling exit")
+        # When running under gunicorn, signal the master process so all workers
+        # shut down — not just the one that received the goodbye event. When
+        # running standalone (local dev, single process), signal just ourselves.
+        if "gunicorn" in sys.modules:
+            os.kill(os.getppid(), signal.SIGTERM)
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def register_signal_handlers(self):
+        """Register SIGTERM and SIGINT handlers for graceful shutdown.
+
+        Should be called from the main thread after start(). Signal handlers
+        can only be registered from the main thread.
+        """
+
+        def _signal_handler(signum: int, frame: Any):
+            sig_name = signal.Signals(signum).name
+            logger.info(f"Received {sig_name}, shutting down")
+            self._trigger_graceful_shutdown()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+        logger.info("Registered SIGTERM and SIGINT signal handlers")
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(

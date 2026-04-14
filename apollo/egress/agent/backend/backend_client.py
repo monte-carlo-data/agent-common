@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from typing import Dict, Any, Optional
 import requests
 from retry import retry
@@ -10,6 +11,8 @@ from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
 from apollo.egress.agent.utils.utils import build_url
 
 logger = logging.getLogger(__name__)
+
+INSTANCE_ID_HEADER = "x-mcd-agent-instance-id"
 
 
 class BackendClient:
@@ -24,6 +27,18 @@ class BackendClient:
     ) -> None:
         self._backend_service_url = backend_service_url
         self._login_token_provider = login_token_provider
+        self._instance_id = str(uuid.uuid4())
+
+    @property
+    def instance_id(self) -> str:
+        return self._instance_id
+
+    def _headers(self, **extra: str) -> Dict[str, str]:
+        return {
+            **self._login_token_provider.get_token(),
+            INSTANCE_ID_HEADER: self._instance_id,
+            **extra,
+        }
 
     def push_results(
         self, operation_id: str, result: Dict[str, Any]
@@ -55,10 +70,7 @@ class BackendClient:
         response = requests.put(
             results_url,
             data=result_str,
-            headers={
-                "Content-Type": "application/json",
-                **self._login_token_provider.get_token(),
-            },
+            headers=self._headers(**{"Content-Type": "application/json"}),
             timeout=60,
         )
         response.raise_for_status()
@@ -81,7 +93,7 @@ class BackendClient:
         """
         try:
             url = build_url(self._backend_service_url, path)
-            headers = self._login_token_provider.get_token()
+            headers = self._headers()
             if body:
                 headers["Content-Type"] = "application/json"
             response = requests.request(
@@ -116,6 +128,26 @@ class BackendClient:
             )
         return operation
 
+    def send_heartbeat(self):
+        """Send a liveness heartbeat to the orchestrator."""
+        url = build_url(self._backend_service_url, "/api/v1/agent/heartbeat")
+        response = requests.post(
+            url,
+            headers=self._headers(),
+            timeout=10,
+        )
+        response.raise_for_status()
+
+    def notify_shutdown(self):
+        """Notify orchestrator that this agent is shutting down. Best-effort."""
+        url = build_url(self._backend_service_url, "/api/v1/agent/shutdown")
+        response = requests.post(
+            url,
+            headers=self._headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+
     def get_next_operation(self) -> Optional[Dict[str, Any]]:
         """
         Fetch next operation from orchestrator queue.
@@ -125,7 +157,7 @@ class BackendClient:
         url = build_url(self._backend_service_url, "/api/v1/agent/operation")
         response = requests.get(
             url,
-            headers=self._login_token_provider.get_token(),
+            headers=self._headers(),
             timeout=30,
         )
         if response.status_code == 204:

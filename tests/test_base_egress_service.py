@@ -1,3 +1,5 @@
+import signal
+
 from unittest import TestCase
 from unittest.mock import Mock, patch, MagicMock
 
@@ -264,3 +266,32 @@ class BaseEgressServiceTests(TestCase):
         result = self._service._can_accept_work()
 
         self.assertFalse(result)
+
+    @patch("apollo.egress.agent.service.base_egress_service.os")
+    def test_handle_goodbye_triggers_graceful_shutdown(self, mock_os):
+        """Test that _handle_goodbye notifies orchestrator, stops threads, and signals exit."""
+        self._service._handle_goodbye("activity_timeout")
+
+        self._backend_client.notify_shutdown.assert_called_once()
+        self._operations_poller.stop.assert_called_once()
+        mock_os.kill.assert_called_once_with(mock_os.getpid(), signal.SIGTERM)
+
+    @patch("apollo.egress.agent.service.base_egress_service.os")
+    def test_trigger_graceful_shutdown_only_runs_once(self, mock_os):
+        """Test that _trigger_graceful_shutdown is guarded against double execution."""
+        self._service._trigger_graceful_shutdown()
+        self._service._trigger_graceful_shutdown()
+
+        # notify and stop called only once
+        self._backend_client.notify_shutdown.assert_called_once()
+        self._operations_poller.stop.assert_called_once()
+
+    def test_start_passes_goodbye_handler_to_events_client(self):
+        """Test that start() passes goodbye_handler to EventsClient."""
+        self._service._sse_enabled = True
+
+        self._service.start()
+
+        call_kwargs = self._events_client.start.call_args.kwargs
+        self.assertIn("goodbye_handler", call_kwargs)
+        self.assertEqual(call_kwargs["goodbye_handler"], self._service._handle_goodbye)

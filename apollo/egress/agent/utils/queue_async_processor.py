@@ -26,7 +26,9 @@ class QueueAsyncProcessor(Generic[T]):
     def start(self):
         self._running = True
         for thread_number in range(self._thread_count):
-            th = Thread(target=self._run, args=(thread_number,))
+            # Daemon threads so they don't block process exit during shutdown.
+            # In-flight operations are abandoned — the orchestrator requeues them.
+            th = Thread(target=self._run, args=(thread_number,), daemon=True)
             th.start()
 
     def stop(self):

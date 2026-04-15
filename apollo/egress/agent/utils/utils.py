@@ -60,6 +60,7 @@ def init_logging(
     if json_format is None:
         json_format = os.environ.get("MCD_LOG_FORMAT", "text").lower() == "json"
     if json_format:
+        logging.root.handlers.clear()
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(_JsonFormatter(instance_id=instance_id))
         logging.root.addHandler(handler)

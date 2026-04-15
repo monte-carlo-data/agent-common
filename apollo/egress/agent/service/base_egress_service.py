@@ -127,6 +127,7 @@ class BaseEgressAgentService(ABC):
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
         skip_logs: bool = False,
+        instance_id: Optional[str] = None,
     ):
         self._platform = platform
         self._service_name = service_name
@@ -173,6 +174,7 @@ class BaseEgressAgentService(ABC):
         self._backend_client = BackendClient(
             backend_service_url=backend_service_url,
             login_token_provider=self._login_token_provider,
+            instance_id=instance_id,
         )
         self._sse_enabled = config_manager.get_bool_value(
             CONFIG_SSE_NOTIFICATIONS_ENABLED, True

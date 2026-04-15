@@ -24,10 +24,11 @@ class BackendClient:
         self,
         backend_service_url: str,
         login_token_provider: LoginTokenProvider,
+        instance_id: Optional[str] = None,
     ) -> None:
         self._backend_service_url = backend_service_url
         self._login_token_provider = login_token_provider
-        self._instance_id = str(uuid.uuid4())
+        self._instance_id = instance_id or str(uuid.uuid4())
 
     @property
     def instance_id(self) -> str:

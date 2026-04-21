@@ -19,5 +19,12 @@ class LocalConfig(ConfigurationPersistence):
     def get_all_values(self) -> Dict[str, str]:
         prefix = f"{self._prefix}_"
         return {
-            key: value for key, value in os.environ.items() if key.startswith(prefix)
+            key: value
+            for key, value in os.environ.items()
+            if key.startswith(prefix) and not self._is_sensitive(key)
         }
+
+    @staticmethod
+    def _is_sensitive(key: str):
+        key_lower = key.lower()
+        return "secret" in key_lower or "password" in key_lower

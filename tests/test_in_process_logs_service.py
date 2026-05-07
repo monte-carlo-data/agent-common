@@ -22,19 +22,20 @@ class InProcessLogShippingHandlerTests(TestCase):
             exc_info=None,
         )
 
-    def test_emit_buffers_in_fluentd_shape(self):
-        handler = InProcessLogShippingHandler(instance_id="abc-123")
+    def test_emit_buffers_record_shape(self):
+        handler = InProcessLogShippingHandler()
         handler.emit(self._make_record(msg="hello world"))
         records = handler.drain()
         self.assertEqual(len(records), 1)
         record = records[0]
-        self.assertEqual(set(record.keys()), {"timestamp", "message", "instance_id"})
+        # instance_id is injected orchestrator-side from the request header,
+        # so the wire shape is just {timestamp, message}.
+        self.assertEqual(set(record.keys()), {"timestamp", "message"})
         self.assertEqual(record["message"], "hello world")
-        self.assertEqual(record["instance_id"], "abc-123")
         self.assertTrue(record["timestamp"].endswith("Z"))
 
     def test_drain_returns_all_records_oldest_first_and_clears(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         handler.emit(self._make_record(msg="first"))
         handler.emit(self._make_record(msg="second"))
         handler.emit(self._make_record(msg="third"))
@@ -44,7 +45,7 @@ class InProcessLogShippingHandlerTests(TestCase):
         self.assertEqual(handler.drain(), [])
 
     def test_peek_returns_records_without_clearing(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         handler.emit(self._make_record(msg="first"))
         handler.emit(self._make_record(msg="second"))
         handler.emit(self._make_record(msg="third"))
@@ -61,7 +62,7 @@ class InProcessLogShippingHandlerTests(TestCase):
         self.assertEqual(len(handler.drain()), 3)
 
     def test_peek_respects_limit(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         for msg in ("a", "b", "c"):
             handler.emit(self._make_record(msg=msg))
         self.assertEqual([r["message"] for r in handler.peek(2)], ["a", "b"])
@@ -69,7 +70,7 @@ class InProcessLogShippingHandlerTests(TestCase):
         self.assertEqual(len(handler.drain()), 3)
 
     def test_buffer_overflow_drops_oldest_and_surfaces_warning(self):
-        handler = InProcessLogShippingHandler(instance_id="i", buffer_size=2)
+        handler = InProcessLogShippingHandler(buffer_size=2)
         handler.emit(self._make_record(msg="a"))
         handler.emit(self._make_record(msg="b"))
         handler.emit(self._make_record(msg="c"))  # evicts "a"
@@ -79,7 +80,6 @@ class InProcessLogShippingHandlerTests(TestCase):
         self.assertEqual(len(records), 3)
         self.assertIn("buffer overflow", records[0]["message"])
         self.assertIn("2 oldest records dropped", records[0]["message"])
-        self.assertEqual(records[0]["instance_id"], "i")
         self.assertEqual([r["message"] for r in records[1:]], ["c", "d"])
 
         # Counter resets after drain — a subsequent drain with no new evictions
@@ -92,7 +92,7 @@ class InProcessLogShippingHandlerTests(TestCase):
         # Python's logging framework checks Handler.level inside callHandlers
         # before invoking emit(). We mirror that path via Logger to make sure
         # our level filter actually gates records.
-        handler = InProcessLogShippingHandler(instance_id="i", level=logging.WARNING)
+        handler = InProcessLogShippingHandler(level=logging.WARNING)
         logger = logging.getLogger("apollo.test.in_process_logs_filter")
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
@@ -107,7 +107,7 @@ class InProcessLogShippingHandlerTests(TestCase):
         )
 
     def test_args_substitution_applied_to_message(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         record = logging.LogRecord(
             name="test",
             level=logging.WARNING,
@@ -125,7 +125,7 @@ class InProcessLogShippingHandlerTests(TestCase):
         # logger.exception(...) and logger.error(..., exc_info=True) must
         # ship the formatted traceback alongside the message — Formatter.format
         # appends it when record.exc_info is set.
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         logger = logging.getLogger("apollo.test.in_process_logs_exc")
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
@@ -147,11 +147,11 @@ class InProcessLogShippingHandlerTests(TestCase):
 
 class InProcessLogsServiceTests(TestCase):
     def test_supports_drain_returns_true(self):
-        service = InProcessLogsService(InProcessLogShippingHandler(instance_id="i"))
+        service = InProcessLogsService(InProcessLogShippingHandler())
         self.assertTrue(service.supports_drain())
 
     def test_drain_returns_all_buffered_records(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         service = InProcessLogsService(handler)
         for msg in ("a", "b", "c"):
             handler.emit(
@@ -171,7 +171,7 @@ class InProcessLogsServiceTests(TestCase):
         self.assertEqual(service.drain(), [])
 
     def test_close_detaches_handler_from_root_logger(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         service = InProcessLogsService(handler)
         root = logging.getLogger()
         root.addHandler(handler)
@@ -185,7 +185,7 @@ class InProcessLogsServiceTests(TestCase):
                 root.removeHandler(handler)
 
     def test_get_logs_is_non_destructive(self):
-        handler = InProcessLogShippingHandler(instance_id="i")
+        handler = InProcessLogShippingHandler()
         service = InProcessLogsService(handler)
         handler.emit(
             logging.LogRecord(
@@ -213,7 +213,7 @@ class SetupInProcessLogShippingTests(TestCase):
     def test_setup_attaches_handler_and_returns_service(self):
         root = logging.getLogger()
         before = list(root.handlers)
-        service = setup_in_process_log_shipping(instance_id="abc")
+        service = setup_in_process_log_shipping()
         try:
             self.assertIsInstance(service, InProcessLogsService)
             # A new handler is attached to the root logger.

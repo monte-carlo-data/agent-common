@@ -7,9 +7,9 @@ records into a bounded in-memory buffer and exposes them via the
 BaseLogsService interface so the existing "Logs sender" TimerService can
 periodically POST them to /api/v1/agent/logs.
 
-Records are reshaped to fluentd's wire format ({timestamp, message,
-instance_id}) so they're indistinguishable from daemonset-shipped records
-on the backend side.
+Records are emitted as {timestamp, message}. The agent's instance_id is
+attached to the request via the x-mcd-agent-instance-id header (set by
+BackendClient on every call) and stamped onto each record orchestrator-side.
 """
 
 import itertools
@@ -32,7 +32,6 @@ class InProcessLogShippingHandler(logging.Handler):
 
     def __init__(
         self,
-        instance_id: Optional[str],
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         level: int = DEFAULT_LEVEL,
     ):
@@ -41,7 +40,6 @@ class InProcessLogShippingHandler(logging.Handler):
         # so logger.exception(...) and logger.error(..., exc_info=True) preserve
         # stack traces in the shipped payload.
         self.setFormatter(logging.Formatter("%(message)s"))
-        self._instance_id = instance_id or ""
         self._buffer: Deque[Dict[str, Any]] = deque(maxlen=buffer_size)
         self._lock = threading.Lock()
         # Counter for records the deque silently evicted because the buffer was
@@ -57,10 +55,11 @@ class InProcessLogShippingHandler(logging.Handler):
             return
         self._reentry.in_emit = True
         try:
+            # instance_id is injected by the orchestrator from the
+            # x-mcd-agent-instance-id request header.
             shipped = {
                 "timestamp": _format_timestamp(record.created),
                 "message": self.format(record),
-                "instance_id": self._instance_id,
             }
             with self._lock:
                 if len(self._buffer) == self._buffer.maxlen:
@@ -89,7 +88,6 @@ class InProcessLogShippingHandler(logging.Handler):
                             f"In-process log buffer overflow: "
                             f"{self._dropped_count} oldest records dropped"
                         ),
-                        "instance_id": self._instance_id,
                     }
                 )
                 self._dropped_count = 0
@@ -138,11 +136,10 @@ class InProcessLogsService(BaseLogsService):
 
 
 def setup_in_process_log_shipping(
-    instance_id: Optional[str],
     level: int = DEFAULT_LEVEL,
 ) -> InProcessLogsService:
     """Construct the handler, attach it to the root logger, return the service."""
-    handler = InProcessLogShippingHandler(instance_id=instance_id, level=level)
+    handler = InProcessLogShippingHandler(level=level)
     logging.getLogger().addHandler(handler)
     logger.info(
         f"In-process log shipping enabled (level={logging.getLevelName(level)})"

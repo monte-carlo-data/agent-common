@@ -492,10 +492,16 @@ class BaseEgressAgentService(ABC):
     def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
         if not self._logs_service:
             return
-        payload = {
-            "logs": self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000))),
-        }
-        logger.info(f"Pushing {len(payload['logs'])} logs")
+        # drain() is destructive and unbounded; get_logs(limit) is the
+        # non-destructive fallback for implementations that don't support
+        # drain (e.g. file-tail-backed services that hand back a sliding
+        # window from a position cursor).
+        if self._logs_service.supports_drain():
+            logs = self._logs_service.drain()
+        else:
+            logs = self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000)))
+        payload = {"logs": logs}
+        logger.info(f"Pushing {len(logs)} logs")
         self._backend_client.execute_operation("/api/v1/agent/logs", "POST", payload)
 
     def _send_ack(self, operation_id: str):

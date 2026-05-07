@@ -295,3 +295,49 @@ class BaseEgressServiceTests(TestCase):
         call_kwargs = self._events_client.start.call_args.kwargs
         self.assertIn("goodbye_handler", call_kwargs)
         self.assertEqual(call_kwargs["goodbye_handler"], self._service._handle_goodbye)
+
+    def _build_service_with_logs(self, logs_service):
+        with patch(
+            "apollo.egress.agent.service.base_egress_service.BackendClient"
+        ) as mock_backend:
+            mock_backend.return_value = self._backend_client
+            return ConcreteEgressService(
+                backend_service_url="http://test",
+                platform="test",
+                service_name="TestService",
+                config_manager=self._config_manager,
+                logs_service=logs_service,
+                metrics_service=Mock(),
+                storage_service=Mock(),
+                login_token_provider=Mock(),
+                ops_runner=self._ops_runner,
+                results_publisher=self._results_publisher,
+                events_client=self._events_client,
+                ack_sender=self._ack_sender,
+                operations_poller=self._operations_poller,
+                skip_logs=False,
+            )
+
+    def test_execute_push_logs_calls_drain_when_supported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        service = self._build_service_with_logs(logs_service)
+        service._execute_push_logs(operation_id="op", event={})
+        logs_service.drain.assert_called_once_with()
+        logs_service.get_logs.assert_not_called()
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs", "POST", {"logs": [{"timestamp": "t", "message": "m"}]}
+        )
+
+    def test_execute_push_logs_falls_back_to_get_logs_when_drain_unsupported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = False
+        logs_service.get_logs.return_value = [{"timestamp": "t", "message": "m"}]
+        service = self._build_service_with_logs(logs_service)
+        service._execute_push_logs(operation_id="op", event={})
+        logs_service.drain.assert_not_called()
+        logs_service.get_logs.assert_called_once_with(1000)
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs", "POST", {"logs": [{"timestamp": "t", "message": "m"}]}
+        )

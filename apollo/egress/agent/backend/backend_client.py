@@ -81,17 +81,44 @@ class BackendClient:
         return response.json()
 
     def execute_operation(
-        self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
+        self,
+        path: str,
+        method: str = "GET",
+        body: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = None,
+        retries: Optional[int] = None,
     ) -> Dict[str, Any]:
-        return self._execute_operation_with_retries(path, method, body)
+        """
+        Perform an operation on the backend service.
+
+        `timeout` (seconds) caps each HTTP attempt; default None preserves the
+        existing no-timeout behavior. `retries=0` skips retries entirely (used
+        for shutdown flushes that must not stall the pod past the grace
+        period). Any other value of `retries`, including the default `None`,
+        uses the standard 3-try exponential backoff.
+        """
+        if retries == 0:
+            return self._do_execute_operation(path, method, body, timeout)
+        return self._execute_operation_with_retries(path, method, body, timeout)
 
     @retry(tries=3, delay=1, backoff=2)
     def _execute_operation_with_retries(
-        self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
+        self,
+        path: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        timeout: Optional[float],
     ) -> Dict[str, Any]:
-        """
-        Performs an operation on the backend service. For example `ping`.
-        """
+        return self._do_execute_operation(path, method, body, timeout)
+
+    def _do_execute_operation(
+        self,
+        path: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
         try:
             url = build_url(self._backend_service_url, path)
             headers = self._headers()
@@ -102,6 +129,7 @@ class BackendClient:
                 url=url,
                 json=body,
                 headers=headers,
+                timeout=timeout,
             )
             logger.info(
                 f"Sent backend request {path}, response: {response.status_code}"

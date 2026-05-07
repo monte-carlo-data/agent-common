@@ -108,6 +108,9 @@ class BaseEgressAgentService(ABC):
     background thread (see ResultsPublisher).
     """
 
+    SHUTDOWN_FLUSH_TIMEOUT_SECONDS: float = 5
+    SHUTDOWN_FLUSH_RETRIES: int = 0
+
     def __init__(
         self,
         backend_service_url: str,
@@ -264,6 +267,22 @@ class BaseEgressAgentService(ABC):
         self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
+        self._stop_logs_service()
+
+    def _stop_logs_service(self) -> None:
+        if self._logs_service is not None:
+            # Release resources first (e.g. detach a logging handler) so any
+            # log emitted during the final flush goes elsewhere rather than
+            # an orphan buffer.
+            self._logs_service.close()
+            if self._logs_service.supports_drain():
+                try:
+                    self._flush_logs(
+                        timeout=self.SHUTDOWN_FLUSH_TIMEOUT_SECONDS,
+                        retries=self.SHUTDOWN_FLUSH_RETRIES,
+                    )
+                except Exception:
+                    logger.exception("Failed to flush logs during shutdown")
 
     def _handle_goodbye(self, reason: str):
         """Handle goodbye event from orchestrator — trigger graceful shutdown."""

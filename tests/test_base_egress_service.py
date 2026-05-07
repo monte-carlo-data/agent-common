@@ -372,3 +372,35 @@ class BaseEgressServiceTests(TestCase):
         service = self._build_service_with_logs(logs_service)
         service._flush_logs()
         self._backend_client.execute_operation.assert_not_called()
+
+    def test_stop_closes_logs_service_and_flushes_when_drain_supported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        # close() runs first so any further log emissions go elsewhere.
+        logs_service.close.assert_called_once_with()
+        # Final flush uses the bounded shutdown timeout + retries.
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=service.SHUTDOWN_FLUSH_TIMEOUT_SECONDS,
+            retries=service.SHUTDOWN_FLUSH_RETRIES,
+        )
+
+    def test_stop_skips_flush_when_drain_unsupported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = False
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        # close() still runs — non-drain services may still hold resources.
+        logs_service.close.assert_called_once_with()
+        # No final flush — non-destructive services are fed by other means
+        # (e.g. external file tailers) that handle their own continuity.
+        self._backend_client.execute_operation.assert_not_called()
+
+    def test_stop_handles_no_logs_service(self):
+        # No logs_service configured — stop() must not raise.
+        self._service.stop()

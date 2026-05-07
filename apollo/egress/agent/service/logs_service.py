@@ -30,3 +30,11 @@ class BaseLogsService(ABC):
         alternative used for on-demand backend pulls.
         """
         raise NotImplementedError("drain() not supported by this implementation")
+
+    def close(self) -> None:
+        """Release any resources held by this service.
+
+        Default no-op. Implementations that hold a logging handler attached
+        to the root logger should override to detach themselves on shutdown.
+        """
+        pass

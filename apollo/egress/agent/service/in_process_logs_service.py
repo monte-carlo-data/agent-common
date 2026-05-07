@@ -1,11 +1,12 @@
 """In-process log shipping for egress agents.
 
-When the platform's external log-tailing path isn't usable (e.g. fluentd
-daemonsets disabled by non-root cluster policies, or environments where no
-external tailer exists), this module captures the agent's structured log
-records into a bounded in-memory buffer and exposes them via the
-BaseLogsService interface so the existing "Logs sender" TimerService can
-periodically POST them to /api/v1/agent/logs.
+This module captures the agent's structured log records into a bounded
+in-memory buffer and exposes them via the BaseLogsService interface so
+the existing "Logs sender" TimerService can periodically POST them to
+/api/v1/agent/logs. No external log tailer (fluentd daemonset etc.) is
+required — useful for clusters that disallow root pods, environments
+without a host-level tailer, or any case where the agent should own
+log shipping itself.
 
 Records are emitted as {timestamp, message}. The agent's instance_id is
 attached to the request via the x-mcd-agent-instance-id header (set by

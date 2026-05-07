@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 INSTANCE_ID_HEADER = "x-mcd-agent-instance-id"
 
 
+class _RetryableHTTPError(Exception):
+    """5xx HTTP errors wrapped to opt into the retry decorator's retry list."""
+
+
 class BackendClient:
     """
     Client used to interact with the MC Backend (Orchestrator) service.
@@ -93,16 +97,29 @@ class BackendClient:
         Perform an operation on the backend service.
 
         `timeout` (seconds) caps each HTTP attempt; default None preserves the
-        existing no-timeout behavior. `retries=0` skips retries entirely (used
-        for shutdown flushes that must not stall the pod past the grace
-        period). Any other value of `retries`, including the default `None`,
-        uses the standard 3-try exponential backoff.
+        existing no-timeout behavior. `retries=0` skips retries entirely. Any
+        other value of `retries`, including the default `None`, uses the
+        standard 3-try exponential backoff — but only for transport errors
+        and 5xx responses; 4xx responses are not retried.
         """
-        if retries == 0:
-            return self._do_execute_operation(path, method, body, timeout)
-        return self._execute_operation_with_retries(path, method, body, timeout)
+        try:
+            if retries == 0:
+                return self._do_execute_operation(path, method, body, timeout)
+            return self._execute_operation_with_retries(path, method, body, timeout)
+        except Exception as ex:
+            logger.error(f"Error sending request to backend: {ex}")
+            return {"error": str(ex)}
 
-    @retry(tries=3, delay=1, backoff=2)
+    @retry(
+        exceptions=(
+            requests.ConnectionError,
+            requests.Timeout,
+            _RetryableHTTPError,
+        ),
+        tries=3,
+        delay=1,
+        backoff=2,
+    )
     def _execute_operation_with_retries(
         self,
         path: str,
@@ -110,7 +127,13 @@ class BackendClient:
         body: Optional[Dict[str, Any]],
         timeout: Optional[float],
     ) -> Dict[str, Any]:
-        return self._do_execute_operation(path, method, body, timeout)
+        try:
+            return self._do_execute_operation(path, method, body, timeout)
+        except requests.HTTPError as ex:
+            # Retry 5xx (server errors) but not 4xx (client errors).
+            if ex.response is not None and ex.response.status_code >= 500:
+                raise _RetryableHTTPError(str(ex)) from ex
+            raise
 
     def _do_execute_operation(
         self,
@@ -119,28 +142,20 @@ class BackendClient:
         body: Optional[Dict[str, Any]],
         timeout: Optional[float],
     ) -> Dict[str, Any]:
-        try:
-            url = build_url(self._backend_service_url, path)
-            headers = self._headers()
-            if body:
-                headers["Content-Type"] = "application/json"
-            response = requests.request(
-                method=method,
-                url=url,
-                json=body,
-                headers=headers,
-                timeout=timeout,
-            )
-            logger.info(
-                f"Sent backend request {path}, response: {response.status_code}"
-            )
-            response.raise_for_status()
-            return response.json() or {"error": "empty response"}
-        except Exception as ex:
-            logger.error(f"Error sending request to backend: {ex}")
-            return {
-                "error": str(ex),
-            }
+        url = build_url(self._backend_service_url, path)
+        headers = self._headers()
+        if body:
+            headers["Content-Type"] = "application/json"
+        response = requests.request(
+            method=method,
+            url=url,
+            json=body,
+            headers=headers,
+            timeout=timeout,
+        )
+        logger.info(f"Sent backend request {path}, response: {response.status_code}")
+        response.raise_for_status()
+        return response.json() or {"error": "empty response"}
 
     def download_operation(self, operation_id: str) -> Dict:
         """

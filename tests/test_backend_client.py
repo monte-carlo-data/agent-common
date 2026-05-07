@@ -226,7 +226,52 @@ class BackendClientURLTests(TestCase):
     ):
         # retries=0 bypasses the retry decorator. Locks in the no-retry
         # guarantee for callers that need it.
-        mock_request.side_effect = ConnectionError("backend down")
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        mock_request.side_effect = RequestsConnectionError("backend down")
         result = self._make_client().execute_operation("/api/v1/test/ping", retries=0)
+        self.assertEqual(mock_request.call_count, 1)
+        self.assertIn("error", result)
+
+    @patch("retry.api.time.sleep")
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_retries_three_times_on_transport_error(
+        self, mock_request: Mock, _mock_sleep: Mock
+    ):
+        # Default path retries on ConnectionError up to 3 attempts.
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        mock_request.side_effect = RequestsConnectionError("backend down")
+        result = self._make_client().execute_operation("/api/v1/test/ping")
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertIn("error", result)
+
+    @patch("retry.api.time.sleep")
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_retries_on_5xx(
+        self, mock_request: Mock, _mock_sleep: Mock
+    ):
+        from requests.exceptions import HTTPError
+
+        mock_response = Mock()
+        mock_response.status_code = 503
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+        mock_request.return_value = mock_response
+        result = self._make_client().execute_operation("/api/v1/test/ping")
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertIn("error", result)
+
+    @patch("retry.api.time.sleep")
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_does_not_retry_on_4xx(
+        self, mock_request: Mock, _mock_sleep: Mock
+    ):
+        from requests.exceptions import HTTPError
+
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+        mock_request.return_value = mock_response
+        result = self._make_client().execute_operation("/api/v1/test/ping")
         self.assertEqual(mock_request.call_count, 1)
         self.assertIn("error", result)

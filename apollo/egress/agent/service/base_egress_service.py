@@ -490,19 +490,39 @@ class BaseEgressAgentService(ABC):
         self._schedule_operation(_PATH_PUSH_LOGS, {ATTR_NAME_PATH: _PATH_PUSH_LOGS})
 
     def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
+        self._flush_logs(event=event)
+
+    def _flush_logs(
+        self,
+        *,
+        event: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        retries: Optional[int] = None,
+    ) -> None:
+        """Drain logs and POST them to /api/v1/agent/logs.
+
+        Used by both the periodic timer-driven push and ad-hoc flushes (e.g.
+        shutdown). `timeout` / `retries` flow through to the request. `event`
+        is consulted only when the service does not support drain — its
+        ATTR_NAME_LIMIT controls the non-destructive get_logs sample size.
+        """
         if not self._logs_service:
             return
-        # drain() is destructive and unbounded; get_logs(limit) is the
-        # non-destructive fallback for implementations that don't support
-        # drain (e.g. file-tail-backed services that hand back a sliding
-        # window from a position cursor).
         if self._logs_service.supports_drain():
             logs = self._logs_service.drain()
         else:
-            logs = self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000)))
-        payload = {"logs": logs}
+            limit = int((event or {}).get(ATTR_NAME_LIMIT, 1000))
+            logs = self._logs_service.get_logs(limit)
+        if not logs:
+            return
         logger.info(f"Pushing {len(logs)} logs")
-        self._backend_client.execute_operation("/api/v1/agent/logs", "POST", payload)
+        self._backend_client.execute_operation(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": logs},
+            timeout=timeout,
+            retries=retries,
+        )
 
     def _send_ack(self, operation_id: str):
         logger.info(f"Sending ACK for operation={operation_id}")

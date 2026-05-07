@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch, MagicMock
 
 from apollo.egress.agent.service.base_egress_service import (
     BaseEgressAgentService,
+    ATTR_NAME_LIMIT,
     ATTR_NAME_OPERATION_ID,
     ATTR_NAME_PATH,
     ATTR_NAME_OPERATION,
@@ -327,7 +328,11 @@ class BaseEgressServiceTests(TestCase):
         logs_service.drain.assert_called_once_with()
         logs_service.get_logs.assert_not_called()
         self._backend_client.execute_operation.assert_called_once_with(
-            "/api/v1/agent/logs", "POST", {"logs": [{"timestamp": "t", "message": "m"}]}
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=None,
+            retries=None,
         )
 
     def test_execute_push_logs_falls_back_to_get_logs_when_drain_unsupported(self):
@@ -335,9 +340,35 @@ class BaseEgressServiceTests(TestCase):
         logs_service.supports_drain.return_value = False
         logs_service.get_logs.return_value = [{"timestamp": "t", "message": "m"}]
         service = self._build_service_with_logs(logs_service)
-        service._execute_push_logs(operation_id="op", event={})
+        service._execute_push_logs(operation_id="op", event={ATTR_NAME_LIMIT: 250})
         logs_service.drain.assert_not_called()
-        logs_service.get_logs.assert_called_once_with(1000)
+        logs_service.get_logs.assert_called_once_with(250)
         self._backend_client.execute_operation.assert_called_once_with(
-            "/api/v1/agent/logs", "POST", {"logs": [{"timestamp": "t", "message": "m"}]}
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=None,
+            retries=None,
         )
+
+    def test_flush_logs_passes_timeout_and_retries(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        service = self._build_service_with_logs(logs_service)
+        service._flush_logs(timeout=5, retries=0)
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=5,
+            retries=0,
+        )
+
+    def test_flush_logs_skips_post_when_empty(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = []
+        service = self._build_service_with_logs(logs_service)
+        service._flush_logs()
+        self._backend_client.execute_operation.assert_not_called()

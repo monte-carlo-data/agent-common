@@ -324,15 +324,13 @@ class BaseEgressServiceTests(TestCase):
         logs_service.supports_drain.return_value = True
         logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
         service = self._build_service_with_logs(logs_service)
-        service._execute_push_logs(operation_id="op", event={})
+        service._execute_push_logs(_operation_id="op", event={})
         logs_service.drain.assert_called_once_with()
         logs_service.get_logs.assert_not_called()
         self._backend_client.execute_operation.assert_called_once_with(
             "/api/v1/agent/logs",
             "POST",
             {"logs": [{"timestamp": "t", "message": "m"}]},
-            timeout=None,
-            retries=None,
         )
 
     def test_execute_push_logs_falls_back_to_get_logs_when_drain_unsupported(self):
@@ -340,29 +338,13 @@ class BaseEgressServiceTests(TestCase):
         logs_service.supports_drain.return_value = False
         logs_service.get_logs.return_value = [{"timestamp": "t", "message": "m"}]
         service = self._build_service_with_logs(logs_service)
-        service._execute_push_logs(operation_id="op", event={ATTR_NAME_LIMIT: 250})
+        service._execute_push_logs(_operation_id="op", event={ATTR_NAME_LIMIT: 250})
         logs_service.drain.assert_not_called()
         logs_service.get_logs.assert_called_once_with(250)
         self._backend_client.execute_operation.assert_called_once_with(
             "/api/v1/agent/logs",
             "POST",
             {"logs": [{"timestamp": "t", "message": "m"}]},
-            timeout=None,
-            retries=None,
-        )
-
-    def test_flush_logs_passes_timeout_and_retries(self):
-        logs_service = Mock()
-        logs_service.supports_drain.return_value = True
-        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
-        service = self._build_service_with_logs(logs_service)
-        service._flush_logs(timeout=5, retries=0)
-        self._backend_client.execute_operation.assert_called_once_with(
-            "/api/v1/agent/logs",
-            "POST",
-            {"logs": [{"timestamp": "t", "message": "m"}]},
-            timeout=5,
-            retries=0,
         )
 
     def test_flush_logs_skips_post_when_empty(self):
@@ -373,21 +355,60 @@ class BaseEgressServiceTests(TestCase):
         service._flush_logs()
         self._backend_client.execute_operation.assert_not_called()
 
-    def test_stop_closes_logs_service_and_flushes_when_drain_supported(self):
+    def test_stop_drains_then_closes_then_flushes_when_drain_supported(self):
         logs_service = Mock()
         logs_service.supports_drain.return_value = True
-        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        # Track call order so we can assert drain happens before close.
+        call_order: list[str] = []
+        logs_service.drain.side_effect = lambda: (
+            call_order.append("drain") or [{"timestamp": "t", "message": "m"}]
+        )
+        logs_service.close.side_effect = lambda: call_order.append("close")
+        self._backend_client.execute_operation.side_effect = (
+            lambda *a, **kw: call_order.append("post") or {}
+        )
         service = self._build_service_with_logs(logs_service)
         service.stop()
-        # close() runs first so any further log emissions go elsewhere.
-        logs_service.close.assert_called_once_with()
-        # Final flush uses the bounded shutdown timeout + retries.
+        # Drain must run before close so records are captured before any
+        # handler detachment, and POST runs last from the local list.
+        self.assertEqual(call_order, ["drain", "close", "post"])
         self._backend_client.execute_operation.assert_called_once_with(
             "/api/v1/agent/logs",
             "POST",
             {"logs": [{"timestamp": "t", "message": "m"}]},
-            timeout=service.SHUTDOWN_FLUSH_TIMEOUT_SECONDS,
-            retries=service.SHUTDOWN_FLUSH_RETRIES,
+            timeout=service.SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS,
+            skip_retries=service.SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES,
+        )
+
+    def test_stop_still_closes_when_drain_raises(self):
+        # Drain failure must not skip close() or short-circuit the rest of
+        # shutdown — each step is independently guarded.
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.side_effect = RuntimeError("drain boom")
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        logs_service.close.assert_called_once_with()
+        # Nothing to POST when drain failed — pending_logs is empty.
+        self._backend_client.execute_operation.assert_not_called()
+
+    def test_stop_still_posts_when_close_raises(self):
+        # close() failure must not skip the POST — records were already
+        # drained into the local list, so they're still shippable.
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        logs_service.close.side_effect = RuntimeError("close boom")
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        logs_service.drain.assert_called_once_with()
+        logs_service.close.assert_called_once_with()
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=service.SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS,
+            skip_retries=service.SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES,
         )
 
     def test_stop_skips_flush_when_drain_unsupported(self):

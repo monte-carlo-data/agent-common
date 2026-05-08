@@ -221,15 +221,17 @@ class BackendClientURLTests(TestCase):
         self.assertIsNone(mock_request.call_args[1]["timeout"])
 
     @patch("apollo.egress.agent.backend.backend_client.requests.request")
-    def test_execute_operation_retries_zero_calls_requests_once(
+    def test_execute_operation_skip_retries_calls_requests_once(
         self, mock_request: Mock
     ):
-        # retries=0 bypasses the retry decorator. Locks in the no-retry
-        # guarantee for callers that need it.
+        # skip_retries=True bypasses the retry decorator. Locks in the
+        # no-retry guarantee for callers that need a hard wall-clock bound.
         from requests.exceptions import ConnectionError as RequestsConnectionError
 
         mock_request.side_effect = RequestsConnectionError("backend down")
-        result = self._make_client().execute_operation("/api/v1/test/ping", retries=0)
+        result = self._make_client().execute_operation(
+            "/api/v1/test/ping", skip_retries=True
+        )
         self.assertEqual(mock_request.call_count, 1)
         self.assertIn("error", result)
 

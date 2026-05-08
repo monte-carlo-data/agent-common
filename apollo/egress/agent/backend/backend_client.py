@@ -91,19 +91,20 @@ class BackendClient:
         body: Optional[Dict[str, Any]] = None,
         *,
         timeout: Optional[float] = None,
-        retries: Optional[int] = None,
+        skip_retries: bool = False,
     ) -> Dict[str, Any]:
         """
         Perform an operation on the backend service.
 
         `timeout` (seconds) caps each HTTP attempt; default None preserves the
-        existing no-timeout behavior. `retries=0` skips retries entirely. Any
-        other value of `retries`, including the default `None`, uses the
-        standard 3-try exponential backoff — but only for transport errors
-        and 5xx responses; 4xx responses are not retried.
+        existing no-timeout behavior. `skip_retries=True` issues a single
+        attempt and bypasses the retry decorator — used by shutdown-style
+        callers that need a hard upper bound on wall-clock time. The default
+        path uses the standard 3-try exponential backoff, but only for
+        transport errors and 5xx responses; 4xx responses are not retried.
         """
         try:
-            if retries == 0:
+            if skip_retries:
                 return self._do_execute_operation(path, method, body, timeout)
             return self._execute_operation_with_retries(path, method, body, timeout)
         except Exception as ex:

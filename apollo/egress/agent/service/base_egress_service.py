@@ -108,8 +108,8 @@ class BaseEgressAgentService(ABC):
     background thread (see ResultsPublisher).
     """
 
-    SHUTDOWN_FLUSH_TIMEOUT_SECONDS: float = 5
-    SHUTDOWN_FLUSH_RETRIES: int = 0
+    SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS: float = 5
+    SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES: bool = True
 
     def __init__(
         self,
@@ -270,19 +270,33 @@ class BaseEgressAgentService(ABC):
         self._stop_logs_service()
 
     def _stop_logs_service(self) -> None:
-        if self._logs_service is not None:
-            # Release resources first (e.g. detach a logging handler) so any
-            # log emitted during the final flush goes elsewhere rather than
-            # an orphan buffer.
+        if self._logs_service is None:
+            return
+        # Drain into a local list *before* close so the close-then-flush race
+        # can't strand records in a detached buffer, and so any failure in
+        # close() doesn't skip the final POST. Each step gets its own
+        # try/except — losing one shouldn't cascade into losing the others.
+        pending_logs: List[Dict[str, Any]] = []
+        if self._logs_service.supports_drain():
+            try:
+                pending_logs = self._logs_service.drain()
+            except Exception:
+                logger.exception("Failed to drain logs during shutdown")
+        try:
             self._logs_service.close()
-            if self._logs_service.supports_drain():
-                try:
-                    self._flush_logs(
-                        timeout=self.SHUTDOWN_FLUSH_TIMEOUT_SECONDS,
-                        retries=self.SHUTDOWN_FLUSH_RETRIES,
-                    )
-                except Exception:
-                    logger.exception("Failed to flush logs during shutdown")
+        except Exception:
+            logger.exception("Failed to close logs service during shutdown")
+        if pending_logs:
+            try:
+                self._backend_client.execute_operation(
+                    "/api/v1/agent/logs",
+                    "POST",
+                    {"logs": pending_logs},
+                    timeout=self.SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS,
+                    skip_retries=self.SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES,
+                )
+            except Exception:
+                logger.exception("Failed to POST logs during shutdown")
 
     def _handle_goodbye(self, reason: str):
         """Handle goodbye event from orchestrator — trigger graceful shutdown."""
@@ -498,7 +512,7 @@ class BaseEgressAgentService(ABC):
             _PATH_PUSH_METRICS, {ATTR_NAME_PATH: _PATH_PUSH_METRICS}
         )
 
-    def _execute_push_metrics(self, operation_id: str, event: Dict[str, Any]):
+    def _execute_push_metrics(self, _operation_id: str, event: Dict[str, Any]):
         payload = {
             "format": "prometheus",
             "metrics": self._metrics_service.fetch_metrics(),
@@ -508,22 +522,17 @@ class BaseEgressAgentService(ABC):
     def _push_logs(self):
         self._schedule_operation(_PATH_PUSH_LOGS, {ATTR_NAME_PATH: _PATH_PUSH_LOGS})
 
-    def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
+    def _execute_push_logs(self, _operation_id: str, event: Dict[str, Any]):
         self._flush_logs(event=event)
 
-    def _flush_logs(
-        self,
-        *,
-        event: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-        retries: Optional[int] = None,
-    ) -> None:
+    def _flush_logs(self, *, event: Optional[Dict[str, Any]] = None) -> None:
         """Drain logs and POST them to /api/v1/agent/logs.
 
-        Used by both the periodic timer-driven push and ad-hoc flushes (e.g.
-        shutdown). `timeout` / `retries` flow through to the request. `event`
-        is consulted only when the service does not support drain — its
-        ATTR_NAME_LIMIT controls the non-destructive get_logs sample size.
+        Used by the periodic timer-driven push (`_execute_push_logs`). The
+        shutdown path inlines its own drain-then-POST in `_stop_logs_service`
+        so each step can be guarded individually. `event` is consulted only
+        when the service does not support drain — its ATTR_NAME_LIMIT
+        controls the non-destructive `get_logs` sample size.
         """
         if not self._logs_service:
             return
@@ -539,8 +548,6 @@ class BaseEgressAgentService(ABC):
             "/api/v1/agent/logs",
             "POST",
             {"logs": logs},
-            timeout=timeout,
-            retries=retries,
         )
 
     def _send_ack(self, operation_id: str):

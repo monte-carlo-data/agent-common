@@ -36,5 +36,12 @@ class BaseLogsService(ABC):
 
         Default no-op. Implementations that hold a logging handler attached
         to the root logger should override to detach themselves on shutdown.
+
+        Contract: implementations must not destroy buffered records here —
+        only stop new arrivals (e.g. detach a handler) and release I/O
+        resources. Callers (notably the shutdown path) drain *before* close,
+        but a future implementation that nulls/clears the buffer in `close()`
+        would still corrupt that ordering for any subsequent caller. The
+        destructive flush path is `drain()`.
         """
         pass

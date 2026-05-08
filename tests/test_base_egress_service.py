@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch, MagicMock
 
 from apollo.egress.agent.service.base_egress_service import (
     BaseEgressAgentService,
+    ATTR_NAME_LIMIT,
     ATTR_NAME_OPERATION_ID,
     ATTR_NAME_PATH,
     ATTR_NAME_OPERATION,
@@ -295,3 +296,132 @@ class BaseEgressServiceTests(TestCase):
         call_kwargs = self._events_client.start.call_args.kwargs
         self.assertIn("goodbye_handler", call_kwargs)
         self.assertEqual(call_kwargs["goodbye_handler"], self._service._handle_goodbye)
+
+    def _build_service_with_logs(self, logs_service):
+        with patch(
+            "apollo.egress.agent.service.base_egress_service.BackendClient"
+        ) as mock_backend:
+            mock_backend.return_value = self._backend_client
+            return ConcreteEgressService(
+                backend_service_url="http://test",
+                platform="test",
+                service_name="TestService",
+                config_manager=self._config_manager,
+                logs_service=logs_service,
+                metrics_service=Mock(),
+                storage_service=Mock(),
+                login_token_provider=Mock(),
+                ops_runner=self._ops_runner,
+                results_publisher=self._results_publisher,
+                events_client=self._events_client,
+                ack_sender=self._ack_sender,
+                operations_poller=self._operations_poller,
+                skip_logs=False,
+            )
+
+    def test_execute_push_logs_calls_drain_when_supported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        service = self._build_service_with_logs(logs_service)
+        service._execute_push_logs(_operation_id="op", event={})
+        logs_service.drain.assert_called_once_with()
+        logs_service.get_logs.assert_not_called()
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+        )
+
+    def test_execute_push_logs_falls_back_to_get_logs_when_drain_unsupported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = False
+        logs_service.get_logs.return_value = [{"timestamp": "t", "message": "m"}]
+        service = self._build_service_with_logs(logs_service)
+        service._execute_push_logs(_operation_id="op", event={ATTR_NAME_LIMIT: 250})
+        logs_service.drain.assert_not_called()
+        logs_service.get_logs.assert_called_once_with(250)
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+        )
+
+    def test_flush_logs_skips_post_when_empty(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = []
+        service = self._build_service_with_logs(logs_service)
+        service._flush_logs()
+        self._backend_client.execute_operation.assert_not_called()
+
+    def test_stop_drains_then_closes_then_flushes_when_drain_supported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        # Track call order so we can assert drain happens before close.
+        call_order: list[str] = []
+        logs_service.drain.side_effect = lambda: (
+            call_order.append("drain") or [{"timestamp": "t", "message": "m"}]
+        )
+        logs_service.close.side_effect = lambda: call_order.append("close")
+        self._backend_client.execute_operation.side_effect = (
+            lambda *a, **kw: call_order.append("post") or {}
+        )
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        # Drain must run before close so records are captured before any
+        # handler detachment, and POST runs last from the local list.
+        self.assertEqual(call_order, ["drain", "close", "post"])
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=service.SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS,
+            skip_retries=service.SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES,
+        )
+
+    def test_stop_still_closes_when_drain_raises(self):
+        # Drain failure must not skip close() or short-circuit the rest of
+        # shutdown — each step is independently guarded.
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.side_effect = RuntimeError("drain boom")
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        logs_service.close.assert_called_once_with()
+        # Nothing to POST when drain failed — pending_logs is empty.
+        self._backend_client.execute_operation.assert_not_called()
+
+    def test_stop_still_posts_when_close_raises(self):
+        # close() failure must not skip the POST — records were already
+        # drained into the local list, so they're still shippable.
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = True
+        logs_service.drain.return_value = [{"timestamp": "t", "message": "m"}]
+        logs_service.close.side_effect = RuntimeError("close boom")
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        logs_service.drain.assert_called_once_with()
+        logs_service.close.assert_called_once_with()
+        self._backend_client.execute_operation.assert_called_once_with(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": [{"timestamp": "t", "message": "m"}]},
+            timeout=service.SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS,
+            skip_retries=service.SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES,
+        )
+
+    def test_stop_skips_flush_when_drain_unsupported(self):
+        logs_service = Mock()
+        logs_service.supports_drain.return_value = False
+        service = self._build_service_with_logs(logs_service)
+        service.stop()
+        # close() still runs — non-drain services may still hold resources.
+        logs_service.close.assert_called_once_with()
+        # No final flush — non-destructive services are fed by other means
+        # (e.g. external file tailers) that handle their own continuity.
+        self._backend_client.execute_operation.assert_not_called()
+
+    def test_stop_handles_no_logs_service(self):
+        # No logs_service configured — stop() must not raise.
+        self._service.stop()

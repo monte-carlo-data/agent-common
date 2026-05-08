@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 INSTANCE_ID_HEADER = "x-mcd-agent-instance-id"
 
 
+class _RetryableHTTPError(Exception):
+    """5xx HTTP errors wrapped to opt into the retry decorator's retry list."""
+
+
 class BackendClient:
     """
     Client used to interact with the MC Backend (Orchestrator) service.
@@ -81,38 +85,78 @@ class BackendClient:
         return response.json()
 
     def execute_operation(
-        self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        return self._execute_operation_with_retries(path, method, body)
-
-    @retry(tries=3, delay=1, backoff=2)
-    def _execute_operation_with_retries(
-        self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
+        self,
+        path: str,
+        method: str = "GET",
+        body: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = None,
+        skip_retries: bool = False,
     ) -> Dict[str, Any]:
         """
-        Performs an operation on the backend service. For example `ping`.
+        Perform an operation on the backend service.
+
+        `timeout` (seconds) caps each HTTP attempt; default None preserves the
+        existing no-timeout behavior. `skip_retries=True` issues a single
+        attempt and bypasses the retry decorator — used by shutdown-style
+        callers that need a hard upper bound on wall-clock time. The default
+        path uses the standard 3-try exponential backoff, but only for
+        transport errors and 5xx responses; 4xx responses are not retried.
         """
         try:
-            url = build_url(self._backend_service_url, path)
-            headers = self._headers()
-            if body:
-                headers["Content-Type"] = "application/json"
-            response = requests.request(
-                method=method,
-                url=url,
-                json=body,
-                headers=headers,
-            )
-            logger.info(
-                f"Sent backend request {path}, response: {response.status_code}"
-            )
-            response.raise_for_status()
-            return response.json() or {"error": "empty response"}
+            if skip_retries:
+                return self._do_execute_operation(path, method, body, timeout)
+            return self._execute_operation_with_retries(path, method, body, timeout)
         except Exception as ex:
             logger.error(f"Error sending request to backend: {ex}")
-            return {
-                "error": str(ex),
-            }
+            return {"error": str(ex)}
+
+    @retry(
+        exceptions=(
+            requests.ConnectionError,
+            requests.Timeout,
+            _RetryableHTTPError,
+        ),
+        tries=3,
+        delay=1,
+        backoff=2,
+    )
+    def _execute_operation_with_retries(
+        self,
+        path: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        try:
+            return self._do_execute_operation(path, method, body, timeout)
+        except requests.HTTPError as ex:
+            # Retry 5xx (server errors) but not 4xx (client errors).
+            if ex.response is not None and ex.response.status_code >= 500:
+                raise _RetryableHTTPError(str(ex)) from ex
+            raise
+
+    def _do_execute_operation(
+        self,
+        path: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        url = build_url(self._backend_service_url, path)
+        headers = self._headers()
+        if body:
+            headers["Content-Type"] = "application/json"
+        response = requests.request(
+            method=method,
+            url=url,
+            json=body,
+            headers=headers,
+            timeout=timeout,
+        )
+        logger.info(f"Sent backend request {path}, response: {response.status_code}")
+        response.raise_for_status()
+        return response.json() or {"error": "empty response"}
 
     def download_operation(self, operation_id: str) -> Dict:
         """

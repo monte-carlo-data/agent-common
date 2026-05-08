@@ -199,3 +199,81 @@ class BackendClientURLTests(TestCase):
             "http://server/custom-path/api/v1/agent/operations/op-456/request",
             called_url,
         )
+
+    def _make_client(self) -> BackendClient:
+        return BackendClient(
+            backend_service_url="http://server",
+            login_token_provider=self._login_token_provider,
+        )
+
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_passes_timeout_to_requests(self, mock_request: Mock):
+        mock_request.return_value = Mock(status_code=200)
+        mock_request.return_value.json.return_value = {"ok": True}
+        self._make_client().execute_operation("/api/v1/test/ping", timeout=5)
+        self.assertEqual(mock_request.call_args[1]["timeout"], 5)
+
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_default_timeout_is_none(self, mock_request: Mock):
+        mock_request.return_value = Mock(status_code=200)
+        mock_request.return_value.json.return_value = {"ok": True}
+        self._make_client().execute_operation("/api/v1/test/ping")
+        self.assertIsNone(mock_request.call_args[1]["timeout"])
+
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_skip_retries_calls_requests_once(
+        self, mock_request: Mock
+    ):
+        # skip_retries=True bypasses the retry decorator. Locks in the
+        # no-retry guarantee for callers that need a hard wall-clock bound.
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        mock_request.side_effect = RequestsConnectionError("backend down")
+        result = self._make_client().execute_operation(
+            "/api/v1/test/ping", skip_retries=True
+        )
+        self.assertEqual(mock_request.call_count, 1)
+        self.assertIn("error", result)
+
+    @patch("retry.api.time.sleep")
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_retries_three_times_on_transport_error(
+        self, mock_request: Mock, _mock_sleep: Mock
+    ):
+        # Default path retries on ConnectionError up to 3 attempts.
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        mock_request.side_effect = RequestsConnectionError("backend down")
+        result = self._make_client().execute_operation("/api/v1/test/ping")
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertIn("error", result)
+
+    @patch("retry.api.time.sleep")
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_retries_on_5xx(
+        self, mock_request: Mock, _mock_sleep: Mock
+    ):
+        from requests.exceptions import HTTPError
+
+        mock_response = Mock()
+        mock_response.status_code = 503
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+        mock_request.return_value = mock_response
+        result = self._make_client().execute_operation("/api/v1/test/ping")
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertIn("error", result)
+
+    @patch("retry.api.time.sleep")
+    @patch("apollo.egress.agent.backend.backend_client.requests.request")
+    def test_execute_operation_does_not_retry_on_4xx(
+        self, mock_request: Mock, _mock_sleep: Mock
+    ):
+        from requests.exceptions import HTTPError
+
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.raise_for_status.side_effect = HTTPError(response=mock_response)
+        mock_request.return_value = mock_response
+        result = self._make_client().execute_operation("/api/v1/test/ping")
+        self.assertEqual(mock_request.call_count, 1)
+        self.assertIn("error", result)

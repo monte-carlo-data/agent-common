@@ -141,12 +141,12 @@ class BaseEgressAgentService(ABC):
         self._ops_runner = ops_runner or OperationsRunner(
             handler=self._execute_scheduled_operation,
             thread_count=config_manager.get_int_value(
-                CONFIG_OPS_RUNNER_THREAD_COUNT, 1
+                CONFIG_OPS_RUNNER_THREAD_COUNT, 18
             ),
         )
         self._results_publisher = results_publisher or ResultsPublisher(
             handler=self._push_results,
-            thread_count=config_manager.get_int_value(CONFIG_PUBLISHER_THREAD_COUNT, 1),
+            thread_count=config_manager.get_int_value(CONFIG_PUBLISHER_THREAD_COUNT, 3),
         )
         self._ack_sender = ack_sender or AckSender(
             interval_seconds=config_manager.get_int_value(

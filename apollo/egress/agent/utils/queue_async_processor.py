@@ -1,4 +1,5 @@
 import logging
+import time
 from threading import Condition, Thread
 from typing import Callable, List, TypeVar, Generic, Any
 
@@ -22,6 +23,13 @@ class QueueAsyncProcessor(Generic[T]):
         self._queue: List[T] = []
         self._running = False
         self._thread_count = max(1, thread_count)
+
+    def _describe_param(self, param: T) -> str:
+        """Subclasses override to include identifying info (e.g. operation_id) in the
+        lifecycle logs emitted by ``_invoke_handler``. Default empty — the lifecycle
+        logs then omit any suffix.
+        """
+        return ""
 
     def start(self):
         self._running = True
@@ -70,9 +78,20 @@ class QueueAsyncProcessor(Generic[T]):
         logger.info(f"{thread_name}: stopped")
 
     def _invoke_handler(self, thread_name: str, param: Any):
+        desc = self._describe_param(param)
+        suffix = f": {desc}" if desc else ""
+        t0 = time.monotonic()
         try:
-            logger.info(f"{thread_name}: running operation")
+            logger.info(f"{thread_name}: running operation{suffix}")
             self._handler(param)
-            logger.info(f"{thread_name}: completed operation")
+            duration_s = time.monotonic() - t0
+            logger.info(
+                f"{thread_name}: completed operation{suffix}, "
+                f"duration_s={duration_s:.3f}"
+            )
         except Exception as ex:
-            logger.exception(f"{thread_name}: Failed to run operation: {ex}")
+            duration_s = time.monotonic() - t0
+            logger.exception(
+                f"{thread_name}: Failed to run operation{suffix}, "
+                f"duration_s={duration_s:.3f}: {ex}"
+            )

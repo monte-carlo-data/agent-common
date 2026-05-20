@@ -52,11 +52,12 @@ class ResultsPublisher(QueueAsyncProcessor[AgentOperationResult]):
             )
         )
 
-    def _handler_wrapper(self, result: AgentOperationResult):
+    def _describe_param(self, result: AgentOperationResult) -> str:
         if result.query_id:
-            logger.info(
-                f"Running results push, operation: {result.operation_id}, query_id: {result.query_id}"
-            )
-        else:
-            logger.info(f"Running results push, operation: {result.operation_id}")
+            return f"{result.operation_id} (query_id={result.query_id})"
+        return result.operation_id
+
+    def _handler_wrapper(self, result: AgentOperationResult):
+        # Lifecycle log (running/completed with operation_id and duration) is
+        # emitted by the base class via ``_describe_param`` above.
         self._results_handler(result)

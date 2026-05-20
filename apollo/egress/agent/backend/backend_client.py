@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from typing import Dict, Any, Optional
 import requests
 from retry import retry
@@ -11,6 +12,12 @@ from apollo.egress.agent.utils.utils import build_url
 
 logger = logging.getLogger(__name__)
 
+INSTANCE_ID_HEADER = "x-mcd-agent-instance-id"
+
+
+class _RetryableHTTPError(Exception):
+    """5xx HTTP errors wrapped to opt into the retry decorator's retry list."""
+
 
 class BackendClient:
     """
@@ -21,9 +28,22 @@ class BackendClient:
         self,
         backend_service_url: str,
         login_token_provider: LoginTokenProvider,
+        instance_id: Optional[str] = None,
     ) -> None:
         self._backend_service_url = backend_service_url
         self._login_token_provider = login_token_provider
+        self._instance_id = instance_id or str(uuid.uuid4())
+
+    @property
+    def instance_id(self) -> str:
+        return self._instance_id
+
+    def _headers(self, **extra: str) -> Dict[str, str]:
+        return {
+            **self._login_token_provider.get_token(),
+            INSTANCE_ID_HEADER: self._instance_id,
+            **extra,
+        }
 
     def push_results(
         self, operation_id: str, result: Dict[str, Any]
@@ -55,10 +75,7 @@ class BackendClient:
         response = requests.put(
             results_url,
             data=result_str,
-            headers={
-                "Content-Type": "application/json",
-                **self._login_token_provider.get_token(),
-            },
+            headers=self._headers(**{"Content-Type": "application/json"}),
             timeout=60,
         )
         response.raise_for_status()
@@ -68,38 +85,78 @@ class BackendClient:
         return response.json()
 
     def execute_operation(
-        self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        return self._execute_operation_with_retries(path, method, body)
-
-    @retry(tries=3, delay=1, backoff=2)
-    def _execute_operation_with_retries(
-        self, path: str, method: str = "GET", body: Optional[Dict[str, Any]] = None
+        self,
+        path: str,
+        method: str = "GET",
+        body: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = None,
+        skip_retries: bool = False,
     ) -> Dict[str, Any]:
         """
-        Performs an operation on the backend service. For example `ping`.
+        Perform an operation on the backend service.
+
+        `timeout` (seconds) caps each HTTP attempt; default None preserves the
+        existing no-timeout behavior. `skip_retries=True` issues a single
+        attempt and bypasses the retry decorator — used by shutdown-style
+        callers that need a hard upper bound on wall-clock time. The default
+        path uses the standard 3-try exponential backoff, but only for
+        transport errors and 5xx responses; 4xx responses are not retried.
         """
         try:
-            url = build_url(self._backend_service_url, path)
-            headers = self._login_token_provider.get_token()
-            if body:
-                headers["Content-Type"] = "application/json"
-            response = requests.request(
-                method=method,
-                url=url,
-                json=body,
-                headers=headers,
-            )
-            logger.info(
-                f"Sent backend request {path}, response: {response.status_code}"
-            )
-            response.raise_for_status()
-            return response.json() or {"error": "empty response"}
+            if skip_retries:
+                return self._do_execute_operation(path, method, body, timeout)
+            return self._execute_operation_with_retries(path, method, body, timeout)
         except Exception as ex:
             logger.error(f"Error sending request to backend: {ex}")
-            return {
-                "error": str(ex),
-            }
+            return {"error": str(ex)}
+
+    @retry(
+        exceptions=(
+            requests.ConnectionError,
+            requests.Timeout,
+            _RetryableHTTPError,
+        ),
+        tries=3,
+        delay=1,
+        backoff=2,
+    )
+    def _execute_operation_with_retries(
+        self,
+        path: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        try:
+            return self._do_execute_operation(path, method, body, timeout)
+        except requests.HTTPError as ex:
+            # Retry 5xx (server errors) but not 4xx (client errors).
+            if ex.response is not None and ex.response.status_code >= 500:
+                raise _RetryableHTTPError(str(ex)) from ex
+            raise
+
+    def _do_execute_operation(
+        self,
+        path: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        url = build_url(self._backend_service_url, path)
+        headers = self._headers()
+        if body:
+            headers["Content-Type"] = "application/json"
+        response = requests.request(
+            method=method,
+            url=url,
+            json=body,
+            headers=headers,
+            timeout=timeout,
+        )
+        logger.info(f"Sent backend request {path}, response: {response.status_code}")
+        response.raise_for_status()
+        return response.json() or {"error": "empty response"}
 
     def download_operation(self, operation_id: str) -> Dict:
         """
@@ -116,6 +173,26 @@ class BackendClient:
             )
         return operation
 
+    def send_heartbeat(self):
+        """Send a liveness heartbeat to the orchestrator."""
+        url = build_url(self._backend_service_url, "/api/v1/agent/heartbeat")
+        response = requests.post(
+            url,
+            headers=self._headers(),
+            timeout=10,
+        )
+        response.raise_for_status()
+
+    def notify_shutdown(self):
+        """Notify orchestrator that this agent is shutting down. Best-effort."""
+        url = build_url(self._backend_service_url, "/api/v1/agent/shutdown")
+        response = requests.post(
+            url,
+            headers=self._headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+
     def get_next_operation(self) -> Optional[Dict[str, Any]]:
         """
         Fetch next operation from orchestrator queue.
@@ -125,7 +202,7 @@ class BackendClient:
         url = build_url(self._backend_service_url, "/api/v1/agent/operation")
         response = requests.get(
             url,
-            headers=self._login_token_provider.get_token(),
+            headers=self._headers(),
             timeout=30,
         )
         if response.status_code == 204:

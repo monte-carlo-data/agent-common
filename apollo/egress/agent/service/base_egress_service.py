@@ -1,11 +1,15 @@
 import logging
+import os
+import signal
+import sys
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, Callable, List
 
-from apollo.egress.agent.backend.backend_client import BackendClient
+from apollo.egress.agent.backend.backend_client import BackendClient, INSTANCE_ID_HEADER
 from apollo.egress.agent.events.ack_sender import (
     AckSender,
     DEFAULT_ACK_INTERVAL_SECONDS,
@@ -104,6 +108,9 @@ class BaseEgressAgentService(ABC):
     background thread (see ResultsPublisher).
     """
 
+    SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS: float = 5
+    SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES: bool = True
+
     def __init__(
         self,
         backend_service_url: str,
@@ -123,6 +130,7 @@ class BaseEgressAgentService(ABC):
         additional_env_vars: Optional[List[str]] = None,
         enable_pre_signed_urls: bool = False,
         skip_logs: bool = False,
+        instance_id: Optional[str] = None,
     ):
         self._platform = platform
         self._service_name = service_name
@@ -133,12 +141,12 @@ class BaseEgressAgentService(ABC):
         self._ops_runner = ops_runner or OperationsRunner(
             handler=self._execute_scheduled_operation,
             thread_count=config_manager.get_int_value(
-                CONFIG_OPS_RUNNER_THREAD_COUNT, 1
+                CONFIG_OPS_RUNNER_THREAD_COUNT, 18
             ),
         )
         self._results_publisher = results_publisher or ResultsPublisher(
             handler=self._push_results,
-            thread_count=config_manager.get_int_value(CONFIG_PUBLISHER_THREAD_COUNT, 1),
+            thread_count=config_manager.get_int_value(CONFIG_PUBLISHER_THREAD_COUNT, 3),
         )
         self._ack_sender = ack_sender or AckSender(
             interval_seconds=config_manager.get_int_value(
@@ -169,6 +177,7 @@ class BaseEgressAgentService(ABC):
         self._backend_client = BackendClient(
             backend_service_url=backend_service_url,
             login_token_provider=self._login_token_provider,
+            instance_id=instance_id,
         )
         self._sse_enabled = config_manager.get_bool_value(
             CONFIG_SSE_NOTIFICATIONS_ENABLED, True
@@ -177,6 +186,7 @@ class BaseEgressAgentService(ABC):
             receiver=SSEClientReceiver(
                 base_url=backend_service_url,
                 login_token_provider=self._login_token_provider,
+                extra_headers={INSTANCE_ID_HEADER: self._backend_client.instance_id},
             ),
         )
         self._operations_poller = operations_poller or OperationsPoller(
@@ -191,6 +201,7 @@ class BaseEgressAgentService(ABC):
                 config_manager=config_manager,
                 push_metrics_handler=self._push_metrics,
             )
+        self._shutdown_lock = threading.Lock()
         self._operations_mapping = [
             OperationMapping(
                 path="/api/v1/agent/execute/",
@@ -234,13 +245,15 @@ class BaseEgressAgentService(ABC):
         if self._sse_enabled:
             self._events_client.start(
                 work_available_handler=self._operations_poller.notify_work_available,
+                goodbye_handler=self._handle_goodbye,
             )
         self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
             self._logs_sender.start(handler=self._push_logs)
 
         logger.info(
-            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()})"
+            f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()}), "
+            f"instance_id={self._backend_client.instance_id}"
         )
 
     def stop(self):
@@ -254,6 +267,82 @@ class BaseEgressAgentService(ABC):
         self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
+        self._stop_logs_service()
+
+    def _stop_logs_service(self) -> None:
+        if self._logs_service is None:
+            return
+        # Drain into a local list *before* close so the close-then-flush race
+        # can't strand records in a detached buffer, and so any failure in
+        # close() doesn't skip the final POST. Each step gets its own
+        # try/except — losing one shouldn't cascade into losing the others.
+        pending_logs: List[Dict[str, Any]] = []
+        if self._logs_service.supports_drain():
+            try:
+                pending_logs = self._logs_service.drain()
+            except Exception:
+                logger.exception("Failed to drain logs during shutdown")
+        try:
+            self._logs_service.close()
+        except Exception:
+            logger.exception("Failed to close logs service during shutdown")
+        if pending_logs:
+            try:
+                self._backend_client.execute_operation(
+                    "/api/v1/agent/logs",
+                    "POST",
+                    {"logs": pending_logs},
+                    timeout=self.SHUTDOWN_LOGS_FLUSH_TIMEOUT_SECONDS,
+                    skip_retries=self.SHUTDOWN_LOGS_FLUSH_SKIP_RETRIES,
+                )
+            except Exception:
+                logger.exception("Failed to POST logs during shutdown")
+
+    def _handle_goodbye(self, reason: str):
+        """Handle goodbye event from orchestrator — trigger graceful shutdown."""
+        logger.warning(f"Orchestrator requested shutdown: {reason}")
+        self._trigger_graceful_shutdown()
+
+    def _trigger_graceful_shutdown(self):
+        """Notify orchestrator, stop all threads, and terminate the process.
+
+        Safe to call from any thread. Cleanup runs exactly once (guarded by
+        _shutdown_lock). In-flight operations are abandoned — the orchestrator
+        requeues them via the shutdown notification.
+        """
+        if not self._shutdown_lock.acquire(blocking=False):
+            return
+        try:
+            self._backend_client.notify_shutdown()
+            logger.info("Notified orchestrator of shutdown")
+        except Exception:
+            logger.exception("Failed to notify orchestrator of shutdown")
+        self.stop()
+        logger.info("Shutdown complete, signaling exit")
+        # When running under gunicorn, signal the master process so all workers
+        # shut down — not just the one that received the goodbye event. When
+        # running standalone (local dev, single process), signal just ourselves.
+        if "gunicorn" in sys.modules:
+            os.kill(os.getppid(), signal.SIGTERM)
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def register_signal_handlers(self):
+        """Register SIGTERM and SIGINT handlers for graceful shutdown.
+
+        Should be called from the main thread after start(). Signal handlers
+        can only be registered from the main thread.
+        """
+
+        def _signal_handler(signum: int, frame: Any):
+            sig_name = signal.Signals(signum).name
+            logger.info(f"Received {sig_name}, shutting down")
+            self._trigger_graceful_shutdown()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+        logger.info("Registered SIGTERM and SIGINT signal handlers")
 
     def health_information(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         health_info = utils.health_information(
@@ -423,7 +512,7 @@ class BaseEgressAgentService(ABC):
             _PATH_PUSH_METRICS, {ATTR_NAME_PATH: _PATH_PUSH_METRICS}
         )
 
-    def _execute_push_metrics(self, operation_id: str, event: Dict[str, Any]):
+    def _execute_push_metrics(self, _operation_id: str, event: Dict[str, Any]):
         payload = {
             "format": "prometheus",
             "metrics": self._metrics_service.fetch_metrics(),
@@ -433,14 +522,33 @@ class BaseEgressAgentService(ABC):
     def _push_logs(self):
         self._schedule_operation(_PATH_PUSH_LOGS, {ATTR_NAME_PATH: _PATH_PUSH_LOGS})
 
-    def _execute_push_logs(self, operation_id: str, event: Dict[str, Any]):
+    def _execute_push_logs(self, _operation_id: str, event: Dict[str, Any]):
+        self._flush_logs(event=event)
+
+    def _flush_logs(self, *, event: Optional[Dict[str, Any]] = None) -> None:
+        """Drain logs and POST them to /api/v1/agent/logs.
+
+        Used by the periodic timer-driven push (`_execute_push_logs`). The
+        shutdown path inlines its own drain-then-POST in `_stop_logs_service`
+        so each step can be guarded individually. `event` is consulted only
+        when the service does not support drain — its ATTR_NAME_LIMIT
+        controls the non-destructive `get_logs` sample size.
+        """
         if not self._logs_service:
             return
-        payload = {
-            "logs": self._logs_service.get_logs(int(event.get(ATTR_NAME_LIMIT, 1000))),
-        }
-        logger.info(f"Pushing {len(payload['logs'])} logs")
-        self._backend_client.execute_operation("/api/v1/agent/logs", "POST", payload)
+        if self._logs_service.supports_drain():
+            logs = self._logs_service.drain()
+        else:
+            limit = int((event or {}).get(ATTR_NAME_LIMIT, 1000))
+            logs = self._logs_service.get_logs(limit)
+        if not logs:
+            return
+        logger.info(f"Pushing {len(logs)} logs")
+        self._backend_client.execute_operation(
+            "/api/v1/agent/logs",
+            "POST",
+            {"logs": logs},
+        )
 
     def _send_ack(self, operation_id: str):
         logger.info(f"Sending ACK for operation={operation_id}")

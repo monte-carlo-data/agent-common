@@ -220,6 +220,25 @@ class OperationsPollerTests(TestCase):
         self.assertGreater(call_count[0], 1)
         poller.stop()
 
+    def test_backpressure_sends_heartbeat(self):
+        """Test that poller sends heartbeat to orchestrator during backpressure."""
+        self._backend_client.get_next_operation.return_value = None
+
+        self._config_manager.get_int_value.return_value = 0.1
+
+        poller = OperationsPoller(
+            backend_client=self._backend_client,
+            config_manager=self._config_manager,
+            operation_handler=self._operation_handler,
+            can_accept_work=lambda: False,  # always backpressured
+        )
+
+        poller.start()
+        time.sleep(0.3)
+
+        self._backend_client.send_heartbeat.assert_called()
+        poller.stop()
+
     def test_no_backpressure_when_can_accept_work_is_none(self):
         """Test that poller fetches normally when can_accept_work is not provided."""
         op1 = {"operation_id": "op-1", "path": "/test1", "operation": {}}

@@ -28,10 +28,12 @@ class SSEClientReceiver(BaseReceiver):
         self,
         base_url: str,
         login_token_provider: LoginTokenProvider,
+        extra_headers: Optional[Dict[str, str]] = None,
     ):
         self._current_loop_id: Optional[str] = None
         self._base_url = base_url
         self._login_token_provider = login_token_provider
+        self._extra_headers = extra_headers or {}
         self._sse_client: Optional[sseclient.SSEClient] = None
         self._event_handler: Optional[Callable[[Dict], None]] = None
         self._connected_handler: Optional[Callable[[], None]] = None
@@ -55,7 +57,9 @@ class SSEClientReceiver(BaseReceiver):
         # enough
         loop_id = str(uuid4())
         self._current_loop_id = loop_id
-        th = Thread(target=self._run_receiver, args=(loop_id,))
+        # Daemon thread so it doesn't block process exit — the SSE network read
+        # can't be interrupted cleanly, and all other cleanup is done before exit.
+        th = Thread(target=self._run_receiver, args=(loop_id,), daemon=True)
         th.start()
 
     def stop(self):
@@ -86,6 +90,7 @@ class SSEClientReceiver(BaseReceiver):
             headers = {
                 "Accept": "text/event-stream",
                 **mc_login_token,
+                **self._extra_headers,
             }
             self._sse_client = sseclient.SSEClient(url, headers=headers)
             if self._connected_handler:

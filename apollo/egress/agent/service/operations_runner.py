@@ -29,6 +29,10 @@ class OperationsRunner(QueueAsyncProcessor[Operation]):
             thread_count=thread_count,
         )
 
+    def _describe_param(self, operation: Operation) -> str:
+        return operation.operation_id
+
     def _handler_wrapper(self, operation: Operation):
-        logger.info(f"Running operation: {operation.operation_id}")
+        # Lifecycle log (running/completed with operation_id and duration) is
+        # emitted by the base class via ``_describe_param`` above.
         self._ops_handler(operation)

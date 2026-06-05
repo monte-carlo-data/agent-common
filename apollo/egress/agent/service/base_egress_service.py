@@ -10,10 +10,6 @@ from enum import Enum
 from typing import Dict, Optional, Any, Callable, List
 
 from apollo.egress.agent.backend.backend_client import BackendClient, INSTANCE_ID_HEADER
-from apollo.egress.agent.events.ack_sender import (
-    AckSender,
-    DEFAULT_ACK_INTERVAL_SECONDS,
-)
 from apollo.egress.agent.events.events_client import EventsClient
 from apollo.egress.agent.events.sse_client_receiver import SSEClientReceiver
 from apollo.egress.agent.config.config_manager import ConfigurationManager
@@ -21,7 +17,6 @@ from apollo.egress.agent.config.config_keys import (
     CONFIG_OPS_RUNNER_THREAD_COUNT,
     CONFIG_PUBLISHER_THREAD_COUNT,
     CONFIG_IS_REMOTE_UPGRADABLE,
-    CONFIG_ACK_INTERVAL_SECONDS,
     CONFIG_PUSH_LOGS_INTERVAL_SECONDS,
     CONFIG_SSE_NOTIFICATIONS_ENABLED,
     CONFIG_METRICS_TIMER_ENABLED,
@@ -124,7 +119,6 @@ class BaseEgressAgentService(ABC):
         ops_runner: Optional[OperationsRunner] = None,
         results_publisher: Optional[ResultsPublisher] = None,
         events_client: Optional[EventsClient] = None,
-        ack_sender: Optional[AckSender] = None,
         logs_sender: Optional[TimerService] = None,
         operations_poller: Optional[OperationsPoller] = None,
         additional_env_vars: Optional[List[str]] = None,
@@ -147,11 +141,6 @@ class BaseEgressAgentService(ABC):
         self._results_publisher = results_publisher or ResultsPublisher(
             handler=self._push_results,
             thread_count=config_manager.get_int_value(CONFIG_PUBLISHER_THREAD_COUNT, 3),
-        )
-        self._ack_sender = ack_sender or AckSender(
-            interval_seconds=config_manager.get_int_value(
-                CONFIG_ACK_INTERVAL_SECONDS, DEFAULT_ACK_INTERVAL_SECONDS
-            )
         )
 
         self._metrics_service = metrics_service
@@ -247,7 +236,6 @@ class BaseEgressAgentService(ABC):
                 work_available_handler=self._operations_poller.notify_work_available,
                 goodbye_handler=self._handle_goodbye,
             )
-        self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
             self._logs_sender.start(handler=self._push_logs)
 
@@ -264,7 +252,6 @@ class BaseEgressAgentService(ABC):
             self._metrics_timer.stop()
         if self._sse_enabled:
             self._events_client.stop()
-        self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
         self._stop_logs_service()
@@ -396,14 +383,11 @@ class BaseEgressAgentService(ABC):
     ):
         """
         Invoked by operations poller when an operation is fetched.
-        Schedules ACK and executes via existing async flow.
+        Executes via the existing async flow.
         """
         logger.info(
             f"Processing polled operation: {path}, operation_id: {operation_id}"
         )
-
-        # Schedule ACK (same as push model)
-        self._ack_sender.schedule_ack(operation_id)
 
         # Execute via existing async flow (ops_runner -> results_publisher)
         self._execute_operation(path, operation_id, operation)
@@ -550,12 +534,6 @@ class BaseEgressAgentService(ABC):
             {"logs": logs},
         )
 
-    def _send_ack(self, operation_id: str):
-        logger.info(f"Sending ACK for operation={operation_id}")
-        self._backend_client.execute_operation(
-            f"/api/v1/agent/operations/{operation_id}/ack", "POST"
-        )
-
     def _schedule_push_results(
         self,
         operation_id: str,
@@ -569,7 +547,6 @@ class BaseEgressAgentService(ABC):
         )
 
     def _push_results(self, result: AgentOperationResult):
-        self._ack_sender.operation_completed(result.operation_id)
         if result.query_id and result.operation_attrs is not None:
             self._push_results_for_query(
                 result.operation_id, result.query_id, result.operation_attrs
@@ -614,9 +591,6 @@ class BaseEgressAgentService(ABC):
         logger.info(
             f"Received piggybacked operation: {path}, operation_id: {operation_id}"
         )
-
-        # Schedule ACK (same as push model)
-        self._ack_sender.schedule_ack(operation_id)
 
         # Execute via existing flow
         self._execute_operation(path, operation_id, operation)

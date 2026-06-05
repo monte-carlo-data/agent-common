@@ -148,11 +148,7 @@ class BaseEgressServiceTests(TestCase):
     def test_handle_polled_operation_calls_execute_operation(self):
         """Test that _handle_polled_operation calls _execute_operation."""
         self._service._execute_operation = Mock()
-        operation = {
-            ATTR_NAME_OPERATION_ID: "op-123",
-            ATTR_NAME_PATH: "/test/path",
-            ATTR_NAME_OPERATION: {"data": "test"},
-        }
+        operation = {"data": "test"}
 
         self._service._handle_polled_operation("/test/path", "op-123", operation)
 

@@ -96,6 +96,8 @@ class BaseEgressAgentService(ABC):
     Operations are pulled from the backend by polling (see OperationsPoller). When SSE
     notifications are enabled, the agent also listens for `work_available` events so it can poll
     promptly rather than waiting for the next interval (see EventsClient and the SSE receivers).
+    Operations may also arrive piggybacked on `push_results` responses (see
+    `_handle_piggybacked_operation`).
     Operations are always processed asynchronously by a pool of background threads (see
     OperationsRunner). When the result is ready we send it to the MC backend using another
     background thread (see ResultsPublisher).
@@ -381,13 +383,12 @@ class BaseEgressAgentService(ABC):
     ):
         """
         Invoked by operations poller when an operation is fetched.
-        Executes via the existing async flow.
+        Executes via the async flow (ops_runner -> results_publisher).
         """
         logger.info(
             f"Processing polled operation: {path}, operation_id: {operation_id}"
         )
 
-        # Execute via existing async flow (ops_runner -> results_publisher)
         self._execute_operation(path, operation_id, operation)
 
     def _execute_operation(self, path: str, operation_id: str, event: Dict[str, Any]):

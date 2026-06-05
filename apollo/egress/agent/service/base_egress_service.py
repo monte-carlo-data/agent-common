@@ -71,7 +71,6 @@ ATTR_NAME_BUILD = "build"
 
 _ATTR_NAME_SIZE_EXCEEDED = "__mcd_size_exceeded__"
 
-_ATTR_OPERATION_TYPE_PUSH_METRICS = "push_metrics"
 _PATH_PUSH_METRICS = "push_metrics"
 _PATH_PUSH_LOGS = "push_logs"
 
@@ -92,12 +91,11 @@ class OperationMapping:
 
 class BaseEgressAgentService(ABC):
     """
-    Base Egress Agent Service, it opens a connection to the Monte Carlo backend
-    (using the token provided through configuration) and waits for events including
-    agent operations to execute.
-    By default, operations are received from the MC backend using a SSE (Server-sent events)
-    connection, but new implementations (polling, gRPC, websockets, etc.) can be implemented by
-    adding new "receivers" (see ReceiverFactory and BaseReceiver).
+    Base Egress Agent Service. It connects to the Monte Carlo backend (using the token provided
+    through configuration) and executes agent operations.
+    Operations are pulled from the backend by polling (see OperationsPoller). When SSE
+    notifications are enabled, the agent also listens for `work_available` events so it can poll
+    promptly rather than waiting for the next interval (see EventsClient and the SSE receivers).
     Operations are always processed asynchronously by a pool of background threads (see
     OperationsRunner). When the result is ready we send it to the MC backend using another
     background thread (see ResultsPublisher).

@@ -17,8 +17,6 @@ CONFIG_PRE_SIGNED_URL_RESPONSE_EXPIRATION_SECONDS = (
 )
 # whether the agent accepts config changes remotely or not
 CONFIG_IS_REMOTE_UPGRADABLE = "IS_REMOTE_UPGRADABLE"
-# interval to send ACK messages in seconds
-CONFIG_ACK_INTERVAL_SECONDS = "ACK_INTERVAL_SECONDS"
 # interval to push logs in seconds
 CONFIG_PUSH_LOGS_INTERVAL_SECONDS = "PUSH_LOGS_INTERVAL_SECONDS"
 # name of the warehouse to use to execute queries

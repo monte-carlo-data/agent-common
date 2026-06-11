@@ -10,10 +10,6 @@ from enum import Enum
 from typing import Dict, Optional, Any, Callable, List
 
 from apollo.egress.agent.backend.backend_client import BackendClient, INSTANCE_ID_HEADER
-from apollo.egress.agent.events.ack_sender import (
-    AckSender,
-    DEFAULT_ACK_INTERVAL_SECONDS,
-)
 from apollo.egress.agent.events.events_client import EventsClient
 from apollo.egress.agent.events.sse_client_receiver import SSEClientReceiver
 from apollo.egress.agent.config.config_manager import ConfigurationManager
@@ -21,7 +17,6 @@ from apollo.egress.agent.config.config_keys import (
     CONFIG_OPS_RUNNER_THREAD_COUNT,
     CONFIG_PUBLISHER_THREAD_COUNT,
     CONFIG_IS_REMOTE_UPGRADABLE,
-    CONFIG_ACK_INTERVAL_SECONDS,
     CONFIG_PUSH_LOGS_INTERVAL_SECONDS,
     CONFIG_SSE_NOTIFICATIONS_ENABLED,
     CONFIG_METRICS_TIMER_ENABLED,
@@ -76,7 +71,6 @@ ATTR_NAME_BUILD = "build"
 
 _ATTR_NAME_SIZE_EXCEEDED = "__mcd_size_exceeded__"
 
-_ATTR_OPERATION_TYPE_PUSH_METRICS = "push_metrics"
 _PATH_PUSH_METRICS = "push_metrics"
 _PATH_PUSH_LOGS = "push_logs"
 
@@ -97,12 +91,13 @@ class OperationMapping:
 
 class BaseEgressAgentService(ABC):
     """
-    Base Egress Agent Service, it opens a connection to the Monte Carlo backend
-    (using the token provided through configuration) and waits for events including
-    agent operations to execute.
-    By default, operations are received from the MC backend using a SSE (Server-sent events)
-    connection, but new implementations (polling, gRPC, websockets, etc.) can be implemented by
-    adding new "receivers" (see ReceiverFactory and BaseReceiver).
+    Base Egress Agent Service. It connects to the Monte Carlo backend (using the token provided
+    through configuration) and executes agent operations.
+    Operations are pulled from the backend by polling (see OperationsPoller). When SSE
+    notifications are enabled, the agent also listens for `work_available` events so it can poll
+    promptly rather than waiting for the next interval (see EventsClient and the SSE receivers).
+    Operations may also arrive piggybacked on `push_results` responses (see
+    `_handle_piggybacked_operation`).
     Operations are always processed asynchronously by a pool of background threads (see
     OperationsRunner). When the result is ready we send it to the MC backend using another
     background thread (see ResultsPublisher).
@@ -124,7 +119,6 @@ class BaseEgressAgentService(ABC):
         ops_runner: Optional[OperationsRunner] = None,
         results_publisher: Optional[ResultsPublisher] = None,
         events_client: Optional[EventsClient] = None,
-        ack_sender: Optional[AckSender] = None,
         logs_sender: Optional[TimerService] = None,
         operations_poller: Optional[OperationsPoller] = None,
         additional_env_vars: Optional[List[str]] = None,
@@ -147,11 +141,6 @@ class BaseEgressAgentService(ABC):
         self._results_publisher = results_publisher or ResultsPublisher(
             handler=self._push_results,
             thread_count=config_manager.get_int_value(CONFIG_PUBLISHER_THREAD_COUNT, 3),
-        )
-        self._ack_sender = ack_sender or AckSender(
-            interval_seconds=config_manager.get_int_value(
-                CONFIG_ACK_INTERVAL_SECONDS, DEFAULT_ACK_INTERVAL_SECONDS
-            )
         )
 
         self._metrics_service = metrics_service
@@ -247,7 +236,6 @@ class BaseEgressAgentService(ABC):
                 work_available_handler=self._operations_poller.notify_work_available,
                 goodbye_handler=self._handle_goodbye,
             )
-        self._ack_sender.start(handler=self._send_ack)
         if self._logs_sender:
             self._logs_sender.start(handler=self._push_logs)
 
@@ -264,7 +252,6 @@ class BaseEgressAgentService(ABC):
             self._metrics_timer.stop()
         if self._sse_enabled:
             self._events_client.stop()
-        self._ack_sender.stop()
         if self._logs_sender:
             self._logs_sender.stop()
         self._stop_logs_service()
@@ -396,16 +383,12 @@ class BaseEgressAgentService(ABC):
     ):
         """
         Invoked by operations poller when an operation is fetched.
-        Schedules ACK and executes via existing async flow.
+        Executes via the async flow (ops_runner -> results_publisher).
         """
         logger.info(
             f"Processing polled operation: {path}, operation_id: {operation_id}"
         )
 
-        # Schedule ACK (same as push model)
-        self._ack_sender.schedule_ack(operation_id)
-
-        # Execute via existing async flow (ops_runner -> results_publisher)
         self._execute_operation(path, operation_id, operation)
 
     def _execute_operation(self, path: str, operation_id: str, event: Dict[str, Any]):
@@ -550,12 +533,6 @@ class BaseEgressAgentService(ABC):
             {"logs": logs},
         )
 
-    def _send_ack(self, operation_id: str):
-        logger.info(f"Sending ACK for operation={operation_id}")
-        self._backend_client.execute_operation(
-            f"/api/v1/agent/operations/{operation_id}/ack", "POST"
-        )
-
     def _schedule_push_results(
         self,
         operation_id: str,
@@ -569,7 +546,6 @@ class BaseEgressAgentService(ABC):
         )
 
     def _push_results(self, result: AgentOperationResult):
-        self._ack_sender.operation_completed(result.operation_id)
         if result.query_id and result.operation_attrs is not None:
             self._push_results_for_query(
                 result.operation_id, result.query_id, result.operation_attrs
@@ -614,9 +590,6 @@ class BaseEgressAgentService(ABC):
         logger.info(
             f"Received piggybacked operation: {path}, operation_id: {operation_id}"
         )
-
-        # Schedule ACK (same as push model)
-        self._ack_sender.schedule_ack(operation_id)
 
         # Execute via existing flow
         self._execute_operation(path, operation_id, operation)

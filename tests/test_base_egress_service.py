@@ -37,7 +37,6 @@ class BaseEgressServiceTests(TestCase):
         self._ops_runner = Mock()
         self._results_publisher = Mock()
         self._events_client = Mock()
-        self._ack_sender = Mock()
         self._operations_poller = Mock()
         self._backend_client = Mock()
 
@@ -57,7 +56,6 @@ class BaseEgressServiceTests(TestCase):
                 ops_runner=self._ops_runner,
                 results_publisher=self._results_publisher,
                 events_client=self._events_client,
-                ack_sender=self._ack_sender,
                 operations_poller=self._operations_poller,
                 skip_logs=True,
             )
@@ -112,7 +110,6 @@ class BaseEgressServiceTests(TestCase):
                 ops_runner=self._ops_runner,
                 results_publisher=self._results_publisher,
                 events_client=self._events_client,
-                ack_sender=self._ack_sender,
                 operations_poller=self._operations_poller,
                 skip_logs=True,
             )
@@ -148,41 +145,16 @@ class BaseEgressServiceTests(TestCase):
 
         self._events_client.stop.assert_not_called()
 
-    def test_handle_polled_operation_schedules_ack(self):
-        """Test that _handle_polled_operation schedules ACK."""
-        self._service._execute_operation = Mock()
-
-        self._service._handle_polled_operation("/test/path", "op-123", {"data": "test"})
-
-        self._ack_sender.schedule_ack.assert_called_once_with("op-123")
-
     def test_handle_polled_operation_calls_execute_operation(self):
         """Test that _handle_polled_operation calls _execute_operation."""
         self._service._execute_operation = Mock()
-        operation = {
-            ATTR_NAME_OPERATION_ID: "op-123",
-            ATTR_NAME_PATH: "/test/path",
-            ATTR_NAME_OPERATION: {"data": "test"},
-        }
+        operation = {"data": "test"}
 
         self._service._handle_polled_operation("/test/path", "op-123", operation)
 
         self._service._execute_operation.assert_called_once_with(
             "/test/path", "op-123", operation
         )
-
-    def test_handle_piggybacked_operation_schedules_ack(self):
-        """Test that _handle_piggybacked_operation schedules ACK."""
-        self._service._execute_operation = Mock()
-        operation = {
-            ATTR_NAME_OPERATION_ID: "op-456",
-            ATTR_NAME_PATH: "/piggybacked/path",
-            ATTR_NAME_OPERATION: {"data": "piggybacked"},
-        }
-
-        self._service._handle_piggybacked_operation(operation)
-
-        self._ack_sender.schedule_ack.assert_called_once_with("op-456")
 
     def test_handle_piggybacked_operation_calls_execute_operation(self):
         """Test that _handle_piggybacked_operation calls _execute_operation."""
@@ -314,7 +286,6 @@ class BaseEgressServiceTests(TestCase):
                 ops_runner=self._ops_runner,
                 results_publisher=self._results_publisher,
                 events_client=self._events_client,
-                ack_sender=self._ack_sender,
                 operations_poller=self._operations_poller,
                 skip_logs=False,
             )

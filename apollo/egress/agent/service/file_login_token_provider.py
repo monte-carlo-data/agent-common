@@ -2,9 +2,13 @@ import json
 import logging
 import os
 from json import JSONDecodeError
-from typing import Dict
+from typing import Any, Dict
 
-from apollo.egress.agent.service.login_token_provider import LoginTokenProvider
+from apollo.egress.agent.service.login_token_provider import (
+    ATTR_NAME_TOKEN_FILE_PATH,
+    AUTH_METHOD_TOKEN_FILE,
+    LoginTokenProvider,
+)
 from apollo.egress.agent.utils.utils import X_MCD_ID, X_MCD_TOKEN
 
 _MCD_ID_ATTR = "mcd_id"
@@ -16,8 +20,18 @@ logger = logging.getLogger(__name__)
 
 
 class FileLoginTokenProvider(LoginTokenProvider):
+    authentication_method: str = AUTH_METHOD_TOKEN_FILE
+
     def __init__(self, file_path: str):
         self._file_path = file_path
+
+    def get_credential_info(self) -> Dict[str, Any]:
+        # The path is included so a missing or unreadable secret file is
+        # self-evident: `no-token-id` plus the path the agent tried to read.
+        return {
+            **super().get_credential_info(),
+            ATTR_NAME_TOKEN_FILE_PATH: self._file_path,
+        }
 
     def get_token(self) -> Dict[str, str]:
         if os.path.exists(self._file_path):

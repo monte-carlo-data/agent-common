@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 INSTANCE_ID_HEADER = "x-mcd-agent-instance-id"
 
+#: Attribute used to report a failed backend request to the caller.
+ATTR_NAME_ERROR = "error"
+
 
 class _RetryableHTTPError(Exception):
     """5xx HTTP errors wrapped to opt into the retry decorator's retry list."""
@@ -109,7 +112,7 @@ class BackendClient:
             return self._execute_operation_with_retries(path, method, body, timeout)
         except Exception as ex:
             logger.error(f"Error sending request to backend: {ex}")
-            return {"error": str(ex)}
+            return {ATTR_NAME_ERROR: str(ex)}
 
     @retry(
         exceptions=(
@@ -156,7 +159,7 @@ class BackendClient:
         )
         logger.info(f"Sent backend request {path}, response: {response.status_code}")
         response.raise_for_status()
-        return response.json() or {"error": "empty response"}
+        return response.json() or {ATTR_NAME_ERROR: "empty response"}
 
     def download_operation(self, operation_id: str) -> Dict:
         """
@@ -167,7 +170,7 @@ class BackendClient:
         operation = self.execute_operation(
             f"/api/v1/agent/operations/{operation_id}/request"
         )
-        if error_message := operation.get("error"):
+        if error_message := operation.get(ATTR_NAME_ERROR):
             raise Exception(
                 f"Failed to download operation {operation_id}: {error_message}"
             )

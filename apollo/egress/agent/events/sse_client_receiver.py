@@ -84,6 +84,9 @@ class SSEClientReceiver(BaseReceiver):
     def _connect_and_consume_events(self, loop_id: str):
         try:
             mc_login_token = self._login_token_provider.get_token()
+            # Asked of the provider rather than read out of the headers above:
+            # not every provider sends its id in a header (OAuth sends a bearer
+            # token), and those would log nothing useful.
             credential_id = self._login_token_provider.get_credential_id()
             logger.info(
                 f"Connecting SSE Client, using credential ID={credential_id} ..."

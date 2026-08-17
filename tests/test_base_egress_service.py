@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch, MagicMock
 from apollo.egress.agent.backend.backend_client import ATTR_NAME_ERROR
 from apollo.egress.agent.service.base_egress_service import (
     BaseEgressAgentService,
+    ATTR_NAME_AUTHENTICATION,
     ATTR_NAME_BACKEND_URL,
     ATTR_NAME_LIMIT,
     ATTR_NAME_OPERATION_ID,
@@ -492,12 +493,44 @@ class CredentialReportingTests(TestCase):
     def test_health_information_reports_credential_info(self):
         health_info = self._service.health_information(trace_id="a-trace-id")
 
-        self.assertEqual("no-token-id", health_info[ATTR_NAME_KEY_ID])
-        self.assertEqual("token_file", health_info[ATTR_NAME_AUTH_METHOD])
         self.assertEqual(
-            "/etc/secrets/mcd-agent-token/contents.json",
-            health_info[ATTR_NAME_TOKEN_FILE_PATH],
+            {
+                ATTR_NAME_KEY_ID: "no-token-id",
+                ATTR_NAME_AUTH_METHOD: "token_file",
+                ATTR_NAME_TOKEN_FILE_PATH: (
+                    "/etc/secrets/mcd-agent-token/contents.json"
+                ),
+            },
+            health_info[ATTR_NAME_AUTHENTICATION],
         )
         self.assertEqual("http://test", health_info[ATTR_NAME_BACKEND_URL])
         # Reporting must never read the token itself.
         self._login_token_provider.get_token.assert_not_called()
+
+    def test_health_information_survives_a_provider_that_raises(self):
+        # get_credential_info() is the documented extension point; an override
+        # that raises must not take /health down.
+        self._login_token_provider.get_credential_info.side_effect = ValueError("boom")
+
+        health_info = self._service.health_information(trace_id="a-trace-id")
+
+        self.assertEqual({}, health_info[ATTR_NAME_AUTHENTICATION])
+        self.assertEqual("1.0.0", health_info["version"])
+        self.assertEqual("http://test", health_info[ATTR_NAME_BACKEND_URL])
+
+    def test_provider_keys_cannot_clobber_health_fields(self):
+        # Namespacing means even a provider returning health-looking keys is
+        # confined to its own section.
+        self._login_token_provider.get_credential_info.return_value = {
+            ATTR_NAME_KEY_ID: "an-id",
+            "version": "not-the-agent-version",
+            "platform": "not-the-agent-platform",
+        }
+
+        health_info = self._service.health_information(trace_id="a-trace-id")
+
+        self.assertEqual(
+            "an-id", health_info[ATTR_NAME_AUTHENTICATION][ATTR_NAME_KEY_ID]
+        )
+        self.assertEqual("1.0.0", health_info["version"])
+        self.assertEqual("test", health_info["platform"])

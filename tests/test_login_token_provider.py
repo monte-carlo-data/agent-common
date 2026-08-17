@@ -11,16 +11,25 @@ from apollo.egress.agent.service.login_token_provider import (
     ATTR_NAME_TOKEN_FILE_PATH,
     AUTH_METHOD_LOCAL_ENV,
     AUTH_METHOD_TOKEN_FILE,
+    AUTH_METHOD_UNKNOWN,
     LocalLoginTokenProvider,
     LoginTokenProvider,
 )
 from apollo.egress.agent.utils.utils import X_MCD_ID, X_MCD_TOKEN
 
 
-class _FailingLoginTokenProvider(LoginTokenProvider):
-    """Provider that raises when credentials are missing, like the SNA one."""
+class _NonReportingLoginTokenProvider(LoginTokenProvider):
+    """Provider that doesn't implement the reporting accessors.
+
+    Its ``get_token()`` is expensive and raises when credentials are missing —
+    like the providers that authenticate against a remote token endpoint.
+    """
+
+    def __init__(self):
+        self.get_token_calls = 0
 
     def get_token(self) -> Dict[str, str]:
+        self.get_token_calls += 1
         raise ValueError("Monte Carlo token file not found")
 
 
@@ -89,13 +98,23 @@ class FileLoginTokenProviderTests(TestCase):
         )
 
 
-class FailingLoginTokenProviderTests(TestCase):
-    def test_credential_id_is_none_when_the_provider_cannot_load_credentials(self):
+class NonReportingLoginTokenProviderTests(TestCase):
+    def test_credential_id_is_none_when_the_provider_does_not_report_one(self):
         """Reporting must not raise: it is called precisely when auth is failing."""
-        provider = _FailingLoginTokenProvider()
+        provider = _NonReportingLoginTokenProvider()
 
         self.assertIsNone(provider.get_credential_id())
         self.assertEqual(
-            {ATTR_NAME_KEY_ID: None, ATTR_NAME_AUTH_METHOD: "unknown"},
+            {ATTR_NAME_KEY_ID: None, ATTR_NAME_AUTH_METHOD: AUTH_METHOD_UNKNOWN},
             provider.get_credential_info(),
         )
+
+    def test_reporting_never_acquires_a_credential(self):
+        """The default must not call get_token(): that can be a remote fetch, on
+        the startup path, for the credential that is already failing."""
+        provider = _NonReportingLoginTokenProvider()
+
+        provider.get_credential_id()
+        provider.get_credential_info()
+
+        self.assertEqual(0, provider.get_token_calls)

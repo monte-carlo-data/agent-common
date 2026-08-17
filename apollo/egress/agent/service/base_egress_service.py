@@ -66,6 +66,7 @@ ATTR_NAME_EVENTS = "events"
 ATTR_NAME_PARAMETERS = "parameters"
 ATTR_NAME_CONFIG = "config"
 ATTR_NAME_ENV = "env"
+ATTR_NAME_AUTHENTICATION = "authentication"
 ATTR_NAME_BACKEND_URL = "backend_url"
 ATTR_NAME_JOB_TYPE = "job_type"
 ATTR_NAME_VERSION = "version"
@@ -353,7 +354,10 @@ class BaseEgressAgentService(ABC):
             if self._config_manager.get_bool_value(CONFIG_IS_REMOTE_UPGRADABLE, True)
             else "false"
         )
-        health_info.update(self._login_token_provider.get_credential_info())
+        # Namespaced: a provider is an extension point and can contribute its own
+        # keys, so keeping them in their own section means none of them can
+        # collide with a health field.
+        health_info[ATTR_NAME_AUTHENTICATION] = self._credential_info_for_reporting()
         health_info[ATTR_NAME_BACKEND_URL] = self._backend_service_url
         return health_info
 

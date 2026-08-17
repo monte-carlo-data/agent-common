@@ -1,4 +1,3 @@
-import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
@@ -18,8 +17,6 @@ AUTH_METHOD_UNKNOWN = "unknown"
 AUTH_METHOD_LOCAL_ENV = "local_env"
 AUTH_METHOD_TOKEN_FILE = "token_file"
 
-logger = logging.getLogger(__name__)
-
 
 class LoginTokenProvider(ABC):
     #: Non-secret label describing how this provider authenticates.
@@ -30,17 +27,16 @@ class LoginTokenProvider(ABC):
         pass
 
     def get_credential_id(self) -> Optional[str]:
-        """Return a non-secret id for the credential in use, for reporting only.
+        """Return a non-secret id for the configured credential, for reporting only.
 
-        Best-effort by design: this is called precisely when authentication is
-        failing, so a provider that cannot load its credentials reports ``None``
-        instead of raising.
+        Implementations MUST NOT acquire a credential to answer this: it is
+        called on the startup path and when authentication is already failing,
+        so a provider that fetches a token here would stall startup and report
+        nothing useful when the fetch is what's broken. Report what the agent is
+        *configured* with — read from the local file or environment — and return
+        ``None`` rather than raising when that isn't available.
         """
-        try:
-            return self.get_token().get(X_MCD_ID)
-        except Exception:
-            logger.warning("Failed to resolve the credential id", exc_info=True)
-            return None
+        return None
 
     def get_credential_info(self) -> Dict[str, Any]:
         """Return a non-secret description of the credential in use.
@@ -57,6 +53,9 @@ class LoginTokenProvider(ABC):
 
 class LocalLoginTokenProvider(LoginTokenProvider):
     authentication_method: str = AUTH_METHOD_LOCAL_ENV
+
+    def get_credential_id(self) -> Optional[str]:
+        return _LOCAL_TOKEN_ID
 
     def get_token(self) -> Dict[str, str]:
         return {

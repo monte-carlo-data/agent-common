@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, Callable, List
 
-from apollo.egress.agent.backend.backend_client import BackendClient, INSTANCE_ID_HEADER
+from apollo.egress.agent.backend.backend_client import (
+    ATTR_NAME_ERROR,
+    BackendClient,
+    INSTANCE_ID_HEADER,
+)
 from apollo.egress.agent.events.events_client import EventsClient
 from apollo.egress.agent.events.sse_client_receiver import SSEClientReceiver
 from apollo.egress.agent.config.config_manager import ConfigurationManager
@@ -45,7 +49,6 @@ from apollo.common.agent.serde import (
 )
 from apollo.egress.agent.utils import utils
 from apollo.egress.agent.utils.result_utils import ResultUtils
-from apollo.egress.agent.utils.utils import X_MCD_ID
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,7 @@ ATTR_NAME_EVENTS = "events"
 ATTR_NAME_PARAMETERS = "parameters"
 ATTR_NAME_CONFIG = "config"
 ATTR_NAME_ENV = "env"
-ATTR_NAME_KEY_ID = "authentication_key_id"
+ATTR_NAME_AUTHENTICATION = "authentication"
 ATTR_NAME_BACKEND_URL = "backend_url"
 ATTR_NAME_JOB_TYPE = "job_type"
 ATTR_NAME_VERSION = "version"
@@ -243,6 +246,11 @@ class BaseEgressAgentService(ABC):
             f"{self._service_name} Service Started: v{self._get_version()} (build #{self._get_build_number()}), "
             f"instance_id={self._backend_client.instance_id}"
         )
+        # Logged on startup so an operator can confirm which credential the agent
+        # loaded without waiting for a backend-driven validation.
+        logger.info(
+            f"Authenticating with: {self._credential_info_for_reporting()}",
+        )
 
     def stop(self):
         self._ops_runner.stop()
@@ -346,18 +354,39 @@ class BaseEgressAgentService(ABC):
             if self._config_manager.get_bool_value(CONFIG_IS_REMOTE_UPGRADABLE, True)
             else "false"
         )
-        health_info[ATTR_NAME_KEY_ID] = self._login_token_provider.get_token().get(
-            X_MCD_ID
-        )
+        # Namespaced: a provider is an extension point and can contribute its own
+        # keys, so keeping them in their own section means none of them can
+        # collide with a health field.
+        health_info[ATTR_NAME_AUTHENTICATION] = self._credential_info_for_reporting()
         health_info[ATTR_NAME_BACKEND_URL] = self._backend_service_url
         return health_info
 
     def run_reachability_test(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
         trace_id = trace_id or str(uuid.uuid4())
         logger.info(f"Running reachability test, trace_id: {trace_id}")
-        return self._backend_client.execute_operation(
+        result = self._backend_client.execute_operation(
             f"/api/v1/test/ping?trace_id={trace_id}"
         )
+        if result.get(ATTR_NAME_ERROR):
+            # Authentication failures are rejected at the backend gateway, so there
+            # is no trace of them on our side: this output is the only place an
+            # operator can see which credential the agent actually sent.
+            # Only added on failure — the success payload comes from the backend
+            # and extra keys could collide with what its consumers parse.
+            result = {
+                **result,
+                **self._credential_info_for_reporting(),
+                ATTR_NAME_BACKEND_URL: self._backend_service_url,
+            }
+        return result
+
+    def _credential_info_for_reporting(self) -> Dict[str, Any]:
+        """Credential info for diagnostics, never at the expense of the result."""
+        try:
+            return self._login_token_provider.get_credential_info()
+        except Exception:
+            logger.warning("Failed to resolve the credential info", exc_info=True)
+            return {}
 
     @abstractmethod
     def _get_version(self) -> str:

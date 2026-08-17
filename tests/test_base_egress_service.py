@@ -3,12 +3,20 @@ import signal
 from unittest import TestCase
 from unittest.mock import Mock, patch, MagicMock
 
+from apollo.egress.agent.backend.backend_client import ATTR_NAME_ERROR
 from apollo.egress.agent.service.base_egress_service import (
     BaseEgressAgentService,
+    ATTR_NAME_AUTHENTICATION,
+    ATTR_NAME_BACKEND_URL,
     ATTR_NAME_LIMIT,
     ATTR_NAME_OPERATION_ID,
     ATTR_NAME_PATH,
     ATTR_NAME_OPERATION,
+)
+from apollo.egress.agent.service.login_token_provider import (
+    ATTR_NAME_AUTH_METHOD,
+    ATTR_NAME_KEY_ID,
+    ATTR_NAME_TOKEN_FILE_PATH,
 )
 
 
@@ -396,3 +404,133 @@ class BaseEgressServiceTests(TestCase):
     def test_stop_handles_no_logs_service(self):
         # No logs_service configured — stop() must not raise.
         self._service.stop()
+
+
+class CredentialReportingTests(TestCase):
+    """The reachability test and health info must say which credential was used.
+
+    Auth failures are rejected at the backend gateway, so the agent's own
+    output is the only place an operator can see the credential id.
+    """
+
+    def setUp(self):
+        self._config_manager = Mock()
+        self._config_manager.get_int_value.return_value = 1
+        self._config_manager.get_bool_value.return_value = True
+
+        self._backend_client = Mock()
+        self._login_token_provider = Mock()
+        self._login_token_provider.get_credential_info.return_value = {
+            ATTR_NAME_KEY_ID: "no-token-id",
+            ATTR_NAME_AUTH_METHOD: "token_file",
+            ATTR_NAME_TOKEN_FILE_PATH: "/etc/secrets/mcd-agent-token/contents.json",
+        }
+
+        with patch(
+            "apollo.egress.agent.service.base_egress_service.BackendClient"
+        ) as mock_backend:
+            mock_backend.return_value = self._backend_client
+            self._service = ConcreteEgressService(
+                backend_service_url="http://test",
+                platform="test",
+                service_name="TestService",
+                config_manager=self._config_manager,
+                logs_service=None,
+                metrics_service=Mock(),
+                storage_service=Mock(),
+                login_token_provider=self._login_token_provider,
+                ops_runner=Mock(),
+                results_publisher=Mock(),
+                events_client=Mock(),
+                operations_poller=Mock(),
+                skip_logs=True,
+            )
+
+    def test_reachability_failure_includes_credential_info(self):
+        self._backend_client.execute_operation.return_value = {
+            ATTR_NAME_ERROR: "401 Client Error: Unauthorized"
+        }
+
+        result = self._service.run_reachability_test(trace_id="a-trace-id")
+
+        self.assertEqual(
+            {
+                ATTR_NAME_ERROR: "401 Client Error: Unauthorized",
+                ATTR_NAME_KEY_ID: "no-token-id",
+                ATTR_NAME_AUTH_METHOD: "token_file",
+                ATTR_NAME_TOKEN_FILE_PATH: "/etc/secrets/mcd-agent-token/contents.json",
+                ATTR_NAME_BACKEND_URL: "http://test",
+            },
+            result,
+        )
+
+    def test_reachability_success_is_returned_unchanged(self):
+        # The success payload comes from the backend; adding keys to it risks
+        # colliding with what its consumers parse.
+        self._backend_client.execute_operation.return_value = {"status": "ok"}
+
+        result = self._service.run_reachability_test(trace_id="a-trace-id")
+
+        self.assertEqual({"status": "ok"}, result)
+
+    def test_reachability_failure_does_not_raise_when_reporting_fails(self):
+        self._backend_client.execute_operation.return_value = {
+            ATTR_NAME_ERROR: "401 Client Error: Unauthorized"
+        }
+        self._login_token_provider.get_credential_info.side_effect = ValueError("boom")
+
+        result = self._service.run_reachability_test(trace_id="a-trace-id")
+
+        # The error and the rest of the context still make it out.
+        self.assertEqual(
+            {
+                ATTR_NAME_ERROR: "401 Client Error: Unauthorized",
+                ATTR_NAME_BACKEND_URL: "http://test",
+            },
+            result,
+        )
+
+    def test_health_information_reports_credential_info(self):
+        health_info = self._service.health_information(trace_id="a-trace-id")
+
+        self.assertEqual(
+            {
+                ATTR_NAME_KEY_ID: "no-token-id",
+                ATTR_NAME_AUTH_METHOD: "token_file",
+                ATTR_NAME_TOKEN_FILE_PATH: (
+                    "/etc/secrets/mcd-agent-token/contents.json"
+                ),
+            },
+            health_info[ATTR_NAME_AUTHENTICATION],
+        )
+        self.assertEqual("http://test", health_info[ATTR_NAME_BACKEND_URL])
+        # Reporting must never read the token itself.
+        self._login_token_provider.get_token.assert_not_called()
+
+    def test_health_information_survives_a_provider_that_raises(self):
+        # get_credential_info() is the documented extension point; an override
+        # that raises must not take /health down.
+        self._login_token_provider.get_credential_info.side_effect = ValueError("boom")
+
+        health_info = self._service.health_information(trace_id="a-trace-id")
+
+        self.assertEqual({}, health_info[ATTR_NAME_AUTHENTICATION])
+        self.assertEqual("1.0.0", health_info["version"])
+        self.assertEqual("http://test", health_info[ATTR_NAME_BACKEND_URL])
+
+    def test_provider_keys_cannot_clobber_health_fields(self):
+        # Namespacing means even a provider returning health-looking keys is
+        # confined to its own section.
+        self._login_token_provider.get_credential_info.return_value = {
+            ATTR_NAME_KEY_ID: "an-id",
+            "version": "not-the-agent-version",
+            "platform": "not-the-agent-platform",
+        }
+
+        health_info = self._service.health_information(trace_id="a-trace-id")
+
+        self.assertEqual(
+            "an-id", health_info[ATTR_NAME_AUTHENTICATION][ATTR_NAME_KEY_ID]
+        )
+        self.assertEqual("1.0.0", health_info["version"])
+        self.assertEqual("test", health_info["platform"])

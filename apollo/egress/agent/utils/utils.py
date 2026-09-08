@@ -35,7 +35,7 @@ def build_url(base_url: str, path: str) -> str:
 
 
 # Attributes every LogRecord carries by default. Anything else on the record was
-# injected through `extra=` by the caller and is what we surface as "extra".
+# injected through `extra=` by the caller and is what we surface as "mcd".
 _STANDARD_LOG_RECORD_ATTRIBUTES = frozenset(
     logging.LogRecord("", logging.INFO, "", 0, "", (), None).__dict__
 ) | {"message", "asctime"}
@@ -75,7 +75,7 @@ class _JsonFormatter(logging.Formatter):
         if self._instance_id:
             log_entry["instance_id"] = self._instance_id
         if extra := get_log_record_extra(record):
-            log_entry["extra"] = extra
+            log_entry["mcd"] = extra
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
         # default=str keeps a stray non-serializable extra value from taking the

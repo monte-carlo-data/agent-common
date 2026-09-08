@@ -69,7 +69,7 @@ class JsonFormatterTests(TestCase):
         self.assertIn("ValueError", parsed["exception"])
 
     def test_format_includes_extra_attributes(self):
-        """Attributes passed via `extra=` are emitted under an "extra" key."""
+        """Attributes passed via `extra=` are emitted under the "mcd" key."""
         formatter = _JsonFormatter(instance_id="test")
         record = logging.getLogger("test").makeRecord(
             "test",
@@ -88,7 +88,7 @@ class JsonFormatterTests(TestCase):
         parsed = json.loads(formatter.format(record))
 
         self.assertEqual(
-            parsed["extra"],
+            parsed["mcd"],
             {
                 "mcd_trace_id": "trace-1",
                 "mcd_operation_name": "query",
@@ -96,18 +96,18 @@ class JsonFormatterTests(TestCase):
             },
         )
         # standard LogRecord attributes are not mistaken for extras
-        self.assertNotIn("levelname", parsed["extra"])
-        self.assertNotIn("created", parsed["extra"])
+        self.assertNotIn("levelname", parsed["mcd"])
+        self.assertNotIn("created", parsed["mcd"])
 
     def test_format_omits_extra_when_absent(self):
-        """No "extra" key when the record carries no custom attributes."""
+        """No "mcd" key when the record carries no custom attributes."""
         formatter = _JsonFormatter()
         record = logging.getLogger("test").makeRecord(
             "test", logging.INFO, "", 0, "plain", (), None
         )
         parsed = json.loads(formatter.format(record))
 
-        self.assertNotIn("extra", parsed)
+        self.assertNotIn("mcd", parsed)
 
     def test_format_redacts_sensitive_extra_attributes(self):
         """Extras go through the standard redaction before hitting stdout."""
@@ -128,10 +128,10 @@ class JsonFormatterTests(TestCase):
         )
         parsed = json.loads(formatter.format(record))
 
-        self.assertEqual(parsed["extra"]["mcd_trace_id"], "trace-1")
-        self.assertEqual(parsed["extra"]["credentials"], "__redacted__")
-        self.assertEqual(parsed["extra"]["connect_args"]["host"], "db.internal")
-        self.assertEqual(parsed["extra"]["connect_args"]["user"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["mcd_trace_id"], "trace-1")
+        self.assertEqual(parsed["mcd"]["credentials"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["connect_args"]["host"], "db.internal")
+        self.assertEqual(parsed["mcd"]["connect_args"]["user"], "__redacted__")
 
     def test_format_handles_non_serializable_extra(self):
         """A non-JSON-serializable extra value must not break the log line."""
@@ -142,7 +142,7 @@ class JsonFormatterTests(TestCase):
         parsed = json.loads(formatter.format(record))
 
         self.assertEqual(parsed["msg"], "msg")
-        self.assertIsInstance(parsed["extra"]["when"], str)
+        self.assertIsInstance(parsed["mcd"]["when"], str)
 
     def test_format_timestamp_is_utc(self):
         """`ts` carries a Z suffix, so it must be rendered in UTC, not local time."""

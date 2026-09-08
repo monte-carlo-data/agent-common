@@ -11,6 +11,12 @@ log shipping itself.
 Records are emitted as {timestamp, message}. The agent's instance_id is
 attached to the request via the x-mcd-agent-instance-id header (set by
 BackendClient on every call) and stamped onto each record orchestrator-side.
+
+With `include_extra` enabled, attributes the caller logged via `extra=`
+(mcd_trace_id, mcd_operation_name, the redacted operation payload) are added
+as siblings of `message`, since the orchestrator spreads every non-message key
+into the Datadog log and DD facets need top-level attributes. Off by default:
+the operation payload on every log line multiplies backend log volume.
 """
 
 import itertools
@@ -21,11 +27,17 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
 
 from apollo.egress.agent.service.logs_service import BaseLogsService
+from apollo.egress.agent.utils.utils import get_log_record_extra
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUFFER_SIZE = 10000
 DEFAULT_LEVEL = logging.INFO
+# Keys extras may never override: the wire contract plus the attributes the
+# orchestrator stamps onto each record before spreading ours over them.
+_RESERVED_RECORD_KEYS = frozenset(
+    {"timestamp", "message", "agent_id", "instance_id", "log_type"}
+)
 
 
 class InProcessLogShippingHandler(logging.Handler):
@@ -35,12 +47,14 @@ class InProcessLogShippingHandler(logging.Handler):
         self,
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         level: int = DEFAULT_LEVEL,
+        include_extra: bool = False,
     ):
         super().__init__(level=level)
         # Default formatter renders "<message>\n<traceback>" when exc_info is set,
         # so logger.exception(...) and logger.error(..., exc_info=True) preserve
         # stack traces in the shipped payload.
         self.setFormatter(logging.Formatter("%(message)s"))
+        self.include_extra = include_extra
         self._buffer: Deque[Dict[str, Any]] = deque(maxlen=buffer_size)
         self._lock = threading.Lock()
         # Counter for records the deque silently evicted because the buffer was
@@ -62,6 +76,12 @@ class InProcessLogShippingHandler(logging.Handler):
                 "timestamp": _format_timestamp(record.created),
                 "message": self.format(record),
             }
+            if self.include_extra:
+                shipped.update(
+                    (k, v)
+                    for k, v in get_log_record_extra(record).items()
+                    if k not in _RESERVED_RECORD_KEYS
+                )
             with self._lock:
                 if len(self._buffer) == self._buffer.maxlen:
                     self._dropped_count += 1
@@ -138,11 +158,13 @@ class InProcessLogsService(BaseLogsService):
 
 def setup_in_process_log_shipping(
     level: int = DEFAULT_LEVEL,
+    include_extra: bool = False,
 ) -> InProcessLogsService:
     """Construct the handler, attach it to the root logger, return the service."""
-    handler = InProcessLogShippingHandler(level=level)
+    handler = InProcessLogShippingHandler(level=level, include_extra=include_extra)
     logging.getLogger().addHandler(handler)
     logger.info(
-        f"In-process log shipping enabled (level={logging.getLevelName(level)})"
+        f"In-process log shipping enabled "
+        f"(level={logging.getLevelName(level)}, include_extra={include_extra})"
     )
     return InProcessLogsService(handler)

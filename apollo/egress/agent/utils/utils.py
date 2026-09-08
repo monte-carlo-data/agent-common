@@ -3,8 +3,11 @@ import logging
 import os
 import socket
 import sys
+import time
 from urllib3.connection import HTTPConnection
 from typing import Dict, Optional, Any, List
+
+from apollo.common.agent.redact import AgentRedactUtilities
 
 BACKEND_SERVICE_URL = os.getenv(
     "BACKEND_SERVICE_URL",
@@ -31,8 +34,32 @@ def build_url(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
+# Attributes every LogRecord carries by default. Anything else on the record was
+# injected through `extra=` by the caller and is what we surface as "extra".
+_STANDARD_LOG_RECORD_ATTRIBUTES = frozenset(
+    logging.LogRecord("", logging.INFO, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+
+
+def get_log_record_extra(record: logging.LogRecord) -> Dict[str, Any]:
+    """
+    Return the attributes passed via `extra=` when the record was logged, redacted
+    with the standard rules so payloads (queries, connection args) never leak
+    credentials. Empty when the record carries no custom attributes.
+    """
+    extra = {
+        k: v
+        for k, v in record.__dict__.items()
+        if k not in _STANDARD_LOG_RECORD_ATTRIBUTES
+    }
+    return AgentRedactUtilities.standard_redact(extra) if extra else {}
+
+
 class _JsonFormatter(logging.Formatter):
     """JSON log formatter that includes instance_id on every line."""
+
+    # "ts" is rendered with a Z suffix, so it must be UTC regardless of host TZ.
+    converter = time.gmtime
 
     def __init__(self, instance_id: Optional[str] = None):
         super().__init__()
@@ -47,9 +74,13 @@ class _JsonFormatter(logging.Formatter):
         }
         if self._instance_id:
             log_entry["instance_id"] = self._instance_id
+        if extra := get_log_record_extra(record):
+            log_entry["extra"] = extra
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_entry)
+        # default=str keeps a stray non-serializable extra value from taking the
+        # whole log line down with it.
+        return json.dumps(log_entry, default=str)
 
 
 def init_logging(

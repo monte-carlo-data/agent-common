@@ -1,9 +1,14 @@
+import datetime
 import json
 import logging
 from unittest import TestCase
 from unittest.mock import patch
 
-from apollo.egress.agent.utils.utils import _JsonFormatter, init_logging
+from apollo.egress.agent.utils.utils import (
+    _JsonFormatter,
+    get_log_record_extra,
+    init_logging,
+)
 
 
 class JsonFormatterTests(TestCase):
@@ -121,17 +126,45 @@ class JsonFormatterTests(TestCase):
             (),
             None,
             extra={
-                "mcd_trace_id": "trace-1",
+                # UUID-shaped: the redactor's value regex would match it, only
+                # the exact key name keeps it. Assert it round-trips.
+                "mcd_trace_id": "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c",
                 "credentials": {"password": "hunter2"},
                 "connect_args": {"host": "db.internal", "user": "admin"},
             },
         )
         parsed = json.loads(formatter.format(record))
 
-        self.assertEqual(parsed["mcd"]["mcd_trace_id"], "trace-1")
+        self.assertEqual(
+            parsed["mcd"]["mcd_trace_id"], "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c"
+        )
         self.assertEqual(parsed["mcd"]["credentials"], "__redacted__")
         self.assertEqual(parsed["mcd"]["connect_args"]["host"], "db.internal")
         self.assertEqual(parsed["mcd"]["connect_args"]["user"], "__redacted__")
+
+    def test_format_redacts_non_string_extra_values(self):
+        """Values that are not JSON-native are stringified before redaction, so
+        an exception message or a PEM blob carrying a secret is still masked."""
+        formatter = _JsonFormatter()
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            "",
+            0,
+            "msg",
+            (),
+            None,
+            extra={
+                "err": Exception("login failed for token abc-super-secret"),
+                "pem": b"-----BEGIN PRIVATE KEY-----\nMIIE...",
+                "nested": {"err": ValueError("bad password: hunter2")},
+            },
+        )
+        parsed = json.loads(formatter.format(record))
+
+        self.assertEqual(parsed["mcd"]["err"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["pem"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["nested"]["err"], "__redacted__")
 
     def test_format_handles_non_serializable_extra(self):
         """A non-JSON-serializable extra value must not break the log line."""
@@ -143,6 +176,38 @@ class JsonFormatterTests(TestCase):
 
         self.assertEqual(parsed["msg"], "msg")
         self.assertIsInstance(parsed["mcd"]["when"], str)
+
+    def test_get_log_record_extra_coerces_to_json_native_types(self):
+        """Tuples, sets and arbitrary objects become lists/strings so both sinks
+        can serialize the result with plain json.dumps."""
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            "",
+            0,
+            "msg",
+            (),
+            None,
+            extra={
+                "positional": ("select 1", (1, 2)),
+                "flags": {"a"},
+                "started_at": datetime.datetime(2026, 9, 9, 12, 0, 0),
+                "count": 3,
+                "ratio": 0.5,
+                "enabled": True,
+                "nothing": None,
+            },
+        )
+        extra = get_log_record_extra(record)
+
+        self.assertEqual(extra["positional"], ["select 1", [1, 2]])
+        self.assertEqual(extra["flags"], ["a"])
+        self.assertEqual(extra["started_at"], "2026-09-09 12:00:00")
+        self.assertEqual(extra["count"], 3)
+        self.assertEqual(extra["ratio"], 0.5)
+        self.assertIs(extra["enabled"], True)
+        self.assertIsNone(extra["nothing"])
+        json.dumps(extra)
 
     def test_format_timestamp_is_utc(self):
         """`ts` carries a Z suffix, so it must be rendered in UTC, not local time."""

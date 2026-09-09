@@ -1,3 +1,5 @@
+import datetime
+import json
 import logging
 from unittest import TestCase
 
@@ -211,6 +213,23 @@ class InProcessLogShippingHandlerTests(TestCase):
             set(records[0].keys()), {"timestamp", "message", "mcd_trace_id"}
         )
         self.assertNotEqual(records[0]["timestamp"], "1970-01-01T00:00:00Z")
+
+    def test_shipped_extras_are_json_serializable(self):
+        # BackendClient posts the drained batch with plain json.dumps; one
+        # non-serializable value would raise there and lose the whole batch.
+        handler = InProcessLogShippingHandler(include_extra=True)
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            __file__,
+            0,
+            "msg",
+            (),
+            None,
+            extra={"started_at": datetime.datetime.now(), "obj": object(), "s": {1}},
+        )
+        handler.emit(record)
+        json.dumps({"logs": handler.drain()})
 
     def test_no_extra_keys_when_enabled_but_record_has_none(self):
         handler = InProcessLogShippingHandler(include_extra=True)

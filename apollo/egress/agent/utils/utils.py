@@ -41,14 +41,33 @@ _STANDARD_LOG_RECORD_ATTRIBUTES = frozenset(
 ) | {"message", "asctime"}
 
 
+def _to_jsonable(value: Any) -> Any:
+    """
+    Coerce a logged value to JSON-native types: dicts and lists recurse, tuples
+    and sets become lists, everything else (bytes, exceptions, datetimes, arbitrary
+    objects) becomes its str(). Done before redaction so a secret inside an
+    exception message or a PEM blob is visible to the redactor, and so both sinks
+    can serialize the result with plain json.dumps.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_to_jsonable(v) for v in value]
+    return str(value)
+
+
 def get_log_record_extra(record: logging.LogRecord) -> Dict[str, Any]:
     """
-    Return the attributes passed via `extra=` when the record was logged, redacted
-    with the standard rules so payloads (queries, connection args) never leak
-    credentials. Empty when the record carries no custom attributes.
+    Return the attributes passed via `extra=` when the record was logged, coerced
+    to JSON-native types and passed through the standard redaction rules. Those
+    rules mask values whose key or content matches known credential patterns;
+    they are best-effort, callers must still not put raw secrets in `extra=`.
+    Empty when the record carries no custom attributes.
     """
     extra = {
-        k: v
+        k: _to_jsonable(v)
         for k, v in record.__dict__.items()
         if k not in _STANDARD_LOG_RECORD_ATTRIBUTES
     }

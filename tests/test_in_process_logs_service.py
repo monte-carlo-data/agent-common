@@ -1,3 +1,5 @@
+import datetime
+import json
 import logging
 from unittest import TestCase
 
@@ -144,6 +146,105 @@ class InProcessLogShippingHandlerTests(TestCase):
         self.assertIn("boom", msg)
         self.assertIn("Traceback", msg)
 
+    def _make_record_with_extra(self) -> logging.LogRecord:
+        return logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            __file__,
+            0,
+            "Executing operation: snowflake/query",
+            (),
+            None,
+            extra={
+                "mcd_trace_id": "trace-1",
+                "operation": {"query": "select 1", "connect_args": {"user": "admin"}},
+            },
+        )
+
+    def test_extra_attributes_not_shipped_by_default(self):
+        # Shipping the operation payload with every log multiplies backend log
+        # volume, so it is opt-in.
+        handler = InProcessLogShippingHandler()
+        handler.emit(self._make_record_with_extra())
+        records = handler.drain()
+        self.assertEqual(set(records[0].keys()), {"timestamp", "message"})
+
+    def test_extra_attributes_shipped_flat_and_redacted_when_enabled(self):
+        # Extras ride as siblings of "message": the orchestrator spreads every
+        # non-message key into the Datadog log, and DD facets need top-level
+        # attributes, not a nested object.
+        handler = InProcessLogShippingHandler(include_extra=True)
+        handler.emit(self._make_record_with_extra())
+        records = handler.drain()
+        self.assertEqual(
+            set(records[0].keys()),
+            {"timestamp", "message", "mcd_trace_id", "operation"},
+        )
+        self.assertEqual(records[0]["mcd_trace_id"], "trace-1")
+        self.assertEqual(
+            records[0]["operation"],
+            {"query": "select 1", "connect_args": {"user": "__redacted__"}},
+        )
+
+    def test_extra_attributes_cannot_clobber_reserved_keys(self):
+        # See _RESERVED_RECORD_KEYS: ours would win the orchestrator's spread,
+        # and Datadog reserved names would retag the log.
+        handler = InProcessLogShippingHandler(include_extra=True)
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            __file__,
+            0,
+            "msg",
+            (),
+            None,
+            extra={
+                "timestamp": "1970-01-01T00:00:00Z",
+                "agent_id": "spoofed",
+                "instance_id": "spoofed",
+                "log_type": "spoofed",
+                "host": "spoofed",
+                "status": "spoofed",
+                "service": "spoofed",
+                "source": "spoofed",
+                "ddsource": "spoofed",
+                "ddtags": "spoofed",
+                "mcd_trace_id": "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c",
+            },
+        )
+        handler.emit(record)
+        records = handler.drain()
+        self.assertEqual(
+            set(records[0].keys()), {"timestamp", "message", "mcd_trace_id"}
+        )
+        self.assertNotEqual(records[0]["timestamp"], "1970-01-01T00:00:00Z")
+        self.assertEqual(
+            records[0]["mcd_trace_id"], "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c"
+        )
+
+    def test_shipped_extras_are_json_serializable(self):
+        # BackendClient posts the drained batch with plain json.dumps; one
+        # non-serializable value would raise there and lose the whole batch.
+        handler = InProcessLogShippingHandler(include_extra=True)
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            __file__,
+            0,
+            "msg",
+            (),
+            None,
+            extra={"started_at": datetime.datetime.now(), "obj": object(), "s": {1}},
+        )
+        handler.emit(record)
+        json.dumps({"logs": handler.drain()})
+
+    def test_no_extra_keys_when_enabled_but_record_has_none(self):
+        handler = InProcessLogShippingHandler(include_extra=True)
+        handler.emit(self._make_record(msg="plain"))
+        records = handler.drain()
+        self.assertEqual(set(records[0].keys()), {"timestamp", "message"})
+
 
 class InProcessLogsServiceTests(TestCase):
     def test_supports_drain_returns_true(self):
@@ -220,6 +321,19 @@ class SetupInProcessLogShippingTests(TestCase):
             self.assertEqual(len(root.handlers), len(before) + 1)
             new_handler = next(h for h in root.handlers if h not in before)
             self.assertIsInstance(new_handler, InProcessLogShippingHandler)
+            # Off by default: this signature is what consumers call.
+            self.assertFalse(new_handler.include_extra)
         finally:
             service.close()
         self.assertEqual(root.handlers, before)
+
+    def test_setup_forwards_include_extra_to_handler(self):
+        root = logging.getLogger()
+        before = list(root.handlers)
+        service = setup_in_process_log_shipping(include_extra=True)
+        try:
+            new_handler = next(h for h in root.handlers if h not in before)
+            self.assertIsInstance(new_handler, InProcessLogShippingHandler)
+            self.assertTrue(new_handler.include_extra)
+        finally:
+            service.close()

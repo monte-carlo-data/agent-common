@@ -1,9 +1,16 @@
+import datetime
 import json
 import logging
+import os
+import time
 from unittest import TestCase
 from unittest.mock import patch
 
-from apollo.egress.agent.utils.utils import _JsonFormatter, init_logging
+from apollo.egress.agent.utils.utils import (
+    _JsonFormatter,
+    get_log_record_extra,
+    init_logging,
+)
 
 
 class JsonFormatterTests(TestCase):
@@ -68,6 +75,182 @@ class JsonFormatterTests(TestCase):
         self.assertIn("exception", parsed)
         self.assertIn("ValueError", parsed["exception"])
 
+    def test_format_includes_extra_attributes(self):
+        """Attributes passed via `extra=` are emitted under the "mcd" key."""
+        formatter = _JsonFormatter(instance_id="test")
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            "agent.py",
+            1,
+            "Executing operation: snowflake/query",
+            (),
+            None,
+            extra={
+                "mcd_trace_id": "trace-1",
+                "mcd_operation_name": "query",
+                "operation": {"type": "query", "query": "select 1"},
+            },
+        )
+        parsed = json.loads(formatter.format(record))
+
+        self.assertEqual(
+            parsed["mcd"],
+            {
+                "mcd_trace_id": "trace-1",
+                "mcd_operation_name": "query",
+                "operation": {"type": "query", "query": "select 1"},
+            },
+        )
+        # standard LogRecord attributes are not mistaken for extras
+        self.assertNotIn("levelname", parsed["mcd"])
+        self.assertNotIn("created", parsed["mcd"])
+
+    def test_format_omits_extra_when_absent(self):
+        """No "mcd" key when the record carries no custom attributes."""
+        formatter = _JsonFormatter()
+        record = logging.getLogger("test").makeRecord(
+            "test", logging.INFO, "", 0, "plain", (), None
+        )
+        parsed = json.loads(formatter.format(record))
+
+        self.assertNotIn("mcd", parsed)
+
+    def test_format_redacts_sensitive_extra_attributes(self):
+        """Extras go through the standard redaction before hitting stdout."""
+        formatter = _JsonFormatter()
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            "",
+            0,
+            "msg",
+            (),
+            None,
+            extra={
+                # UUID-shaped: the redactor's value regex would match it, only
+                # the exact key name keeps it. Assert it round-trips.
+                "mcd_trace_id": "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c",
+                "credentials": {"password": "hunter2"},
+                "connect_args": {"host": "db.internal", "user": "admin"},
+            },
+        )
+        parsed = json.loads(formatter.format(record))
+
+        self.assertEqual(
+            parsed["mcd"]["mcd_trace_id"], "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c"
+        )
+        self.assertEqual(parsed["mcd"]["credentials"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["connect_args"]["host"], "db.internal")
+        self.assertEqual(parsed["mcd"]["connect_args"]["user"], "__redacted__")
+
+    def test_format_redacts_non_string_extra_values(self):
+        """Values that are not JSON-native are stringified before redaction, so
+        an exception message or a PEM blob carrying a secret is still masked."""
+        formatter = _JsonFormatter()
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            "",
+            0,
+            "msg",
+            (),
+            None,
+            extra={
+                "err": Exception("login failed for token abc-super-secret"),
+                "pem": b"-----BEGIN PRIVATE KEY-----\nMIIE...",
+                "nested": {"err": ValueError("bad password: hunter2")},
+            },
+        )
+        parsed = json.loads(formatter.format(record))
+
+        self.assertEqual(parsed["mcd"]["err"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["pem"], "__redacted__")
+        self.assertEqual(parsed["mcd"]["nested"]["err"], "__redacted__")
+
+    def test_format_handles_non_serializable_extra(self):
+        """A non-JSON-serializable extra value must not break the log line."""
+        formatter = _JsonFormatter()
+        record = logging.getLogger("test").makeRecord(
+            "test", logging.INFO, "", 0, "msg", (), None, extra={"when": object()}
+        )
+        parsed = json.loads(formatter.format(record))
+
+        self.assertEqual(parsed["msg"], "msg")
+        self.assertIsInstance(parsed["mcd"]["when"], str)
+
+    def test_get_log_record_extra_coerces_to_json_native_types(self):
+        """Tuples, sets and arbitrary objects become lists/strings so both sinks
+        can serialize the result with plain json.dumps."""
+        record = logging.getLogger("test").makeRecord(
+            "test",
+            logging.INFO,
+            "",
+            0,
+            "msg",
+            (),
+            None,
+            extra={
+                "positional": ("select 1", (1, 2)),
+                "flags": {"a"},
+                "started_at": datetime.datetime(2026, 9, 9, 12, 0, 0),
+                "count": 3,
+                "ratio": 0.5,
+                "enabled": True,
+                "nothing": None,
+            },
+        )
+        extra = get_log_record_extra(record)
+
+        self.assertEqual(extra["positional"], ["select 1", [1, 2]])
+        self.assertEqual(extra["flags"], ["a"])
+        self.assertEqual(extra["started_at"], "2026-09-09 12:00:00")
+        self.assertEqual(extra["count"], 3)
+        self.assertEqual(extra["ratio"], 0.5)
+        self.assertIs(extra["enabled"], True)
+        self.assertIsNone(extra["nothing"])
+        json.dumps(extra)
+
+    def test_format_timestamp_is_utc(self):
+        """`ts` carries a Z suffix, so it must be rendered in UTC, not local time."""
+        pin_non_utc_timezone(self)
+        formatter = _JsonFormatter()
+        record = logging.getLogger("test").makeRecord(
+            "test", logging.INFO, "", 0, "msg", (), None
+        )
+        record.created = 1757369400  # 2025-09-08T22:10:00Z
+        parsed = json.loads(formatter.format(record))
+
+        self.assertEqual(parsed["ts"], "2025-09-08T22:10:00Z")
+
+    def test_format_ignores_attributes_set_by_other_formatters(self):
+        """Formatter.format() mutates the record (message, asctime). When another
+        handler formats first, those must not show up as extras."""
+        record = logging.getLogger("test").makeRecord(
+            "test", logging.INFO, "", 0, "msg", (), None, extra={"mine": 1}
+        )
+        logging.Formatter("%(asctime)s %(message)s").format(record)
+        parsed = json.loads(_JsonFormatter().format(record))
+
+        self.assertEqual(parsed["mcd"], {"mine": 1})
+
+
+def pin_non_utc_timezone(test: TestCase, tz: str = "America/New_York") -> None:
+    """Make local time differ from UTC for the duration of a test, so a formatter
+    that silently falls back to localtime fails in CI (which runs in UTC)."""
+    previous = os.environ.get("TZ")
+
+    def restore():
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+    os.environ["TZ"] = tz
+    time.tzset()
+    test.addCleanup(restore)
+
 
 class InitLoggingTests(TestCase):
     def setUp(self):
@@ -91,6 +274,21 @@ class InitLoggingTests(TestCase):
 
         self.assertGreaterEqual(len(logging.root.handlers), 1)
         self.assertNotIsInstance(logging.root.handlers[0].formatter, _JsonFormatter)
+
+    def test_text_format_timestamp_is_utc(self):
+        """The text format also stamps a Z suffix, so it must render UTC too."""
+        pin_non_utc_timezone(self)
+        init_logging(json_format=False)
+        formatter = logging.root.handlers[0].formatter
+        assert formatter is not None
+        record = logging.getLogger("test.logger").makeRecord(
+            "test.logger", logging.INFO, "", 0, "msg", (), None
+        )
+        record.created = 1757369400  # 2025-09-08T22:10:00Z
+
+        self.assertEqual(
+            formatter.format(record), "[2025-09-08T22:10:00Z] INFO:test.logger: msg"
+        )
 
     @patch.dict("os.environ", {"MCD_LOG_FORMAT": "json"})
     def test_env_var_json(self):

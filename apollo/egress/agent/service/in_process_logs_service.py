@@ -11,6 +11,18 @@ log shipping itself.
 Records are emitted as {timestamp, message}. The agent's instance_id is
 attached to the request via the x-mcd-agent-instance-id header (set by
 BackendClient on every call) and stamped onto each record orchestrator-side.
+
+With `include_extra` enabled, attributes the caller logged via `extra=`
+(mcd_trace_id, mcd_operation_name, the redacted operation payload) are added
+as siblings of `message`, since the orchestrator spreads every non-message key
+into the Datadog log and DD facets need top-level attributes. The handler sits
+on the root logger, so this covers whatever any logger in the process attaches
+to a record, filtered only by `_RESERVED_RECORD_KEYS`.
+
+Off by default. Beyond backend log volume, the buffer is bounded by record
+count, not bytes: with extras on, each "Executing operation" record also holds
+the query text, so a long backend outage costs proportionally more agent memory
+and produces a larger recovery POST.
 """
 
 import itertools
@@ -21,11 +33,32 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
 
 from apollo.egress.agent.service.logs_service import BaseLogsService
+from apollo.egress.agent.utils.utils import get_log_record_extra
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUFFER_SIZE = 10000
 DEFAULT_LEVEL = logging.INFO
+# Keys extras may never override. "timestamp" and "message" are the wire
+# contract of /api/v1/agent/logs; "agent_id", "instance_id" and "log_type" are
+# stamped onto each record by that endpoint's handler before it spreads ours
+# over them (keep in sync with it); the rest are Datadog reserved attributes
+# that would retag or misattribute the log if a third-party extra used them.
+_RESERVED_RECORD_KEYS = frozenset(
+    {
+        "timestamp",
+        "message",
+        "agent_id",
+        "instance_id",
+        "log_type",
+        "host",
+        "status",
+        "service",
+        "source",
+        "ddsource",
+        "ddtags",
+    }
+)
 
 
 class InProcessLogShippingHandler(logging.Handler):
@@ -35,12 +68,14 @@ class InProcessLogShippingHandler(logging.Handler):
         self,
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         level: int = DEFAULT_LEVEL,
+        include_extra: bool = False,
     ):
         super().__init__(level=level)
         # Default formatter renders "<message>\n<traceback>" when exc_info is set,
         # so logger.exception(...) and logger.error(..., exc_info=True) preserve
         # stack traces in the shipped payload.
         self.setFormatter(logging.Formatter("%(message)s"))
+        self.include_extra = include_extra
         self._buffer: Deque[Dict[str, Any]] = deque(maxlen=buffer_size)
         self._lock = threading.Lock()
         # Counter for records the deque silently evicted because the buffer was
@@ -62,6 +97,12 @@ class InProcessLogShippingHandler(logging.Handler):
                 "timestamp": _format_timestamp(record.created),
                 "message": self.format(record),
             }
+            if self.include_extra:
+                shipped.update(
+                    (k, v)
+                    for k, v in get_log_record_extra(record).items()
+                    if k not in _RESERVED_RECORD_KEYS
+                )
             with self._lock:
                 if len(self._buffer) == self._buffer.maxlen:
                     self._dropped_count += 1
@@ -138,11 +179,13 @@ class InProcessLogsService(BaseLogsService):
 
 def setup_in_process_log_shipping(
     level: int = DEFAULT_LEVEL,
+    include_extra: bool = False,
 ) -> InProcessLogsService:
     """Construct the handler, attach it to the root logger, return the service."""
-    handler = InProcessLogShippingHandler(level=level)
+    handler = InProcessLogShippingHandler(level=level, include_extra=include_extra)
     logging.getLogger().addHandler(handler)
     logger.info(
-        f"In-process log shipping enabled (level={logging.getLevelName(level)})"
+        f"In-process log shipping enabled "
+        f"(level={logging.getLevelName(level)}, include_extra={include_extra})"
     )
     return InProcessLogsService(handler)

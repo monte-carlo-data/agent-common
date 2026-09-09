@@ -3,8 +3,11 @@ import logging
 import os
 import socket
 import sys
+import time
 from urllib3.connection import HTTPConnection
 from typing import Dict, Optional, Any, List
+
+from apollo.common.agent.redact import AgentRedactUtilities
 
 BACKEND_SERVICE_URL = os.getenv(
     "BACKEND_SERVICE_URL",
@@ -31,8 +34,63 @@ def build_url(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
+# Attributes every LogRecord carries by default. Anything on a record beyond these
+# was injected by the caller through `extra=`. "message" and "asctime" are not set
+# by the constructor but by Formatter.format(), which runs before this code
+# whenever another handler formats the record first.
+_STANDARD_LOG_RECORD_ATTRIBUTES = frozenset(
+    logging.LogRecord("", logging.INFO, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+
+
+def _to_jsonable(value: Any) -> Any:
+    """
+    Coerce a logged value to JSON-native types: dicts and lists recurse, tuples
+    and sets become lists, everything else (bytes, exceptions, datetimes, arbitrary
+    objects) becomes its str(). Done before redaction so a secret inside an
+    exception message or a PEM blob is visible to the redactor, and so both sinks
+    can serialize the result with plain json.dumps.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_to_jsonable(v) for v in value]
+    return str(value)
+
+
+def get_log_record_extra(record: logging.LogRecord) -> Dict[str, Any]:
+    """
+    Return the attributes passed via `extra=` when the record was logged, coerced
+    to JSON-native types and passed through the standard redaction rules. Those
+    rules mask values whose key or content matches known credential patterns;
+    they are best-effort, callers must still not put raw secrets in `extra=`.
+    Empty when the record carries no custom attributes.
+    """
+    extra = {
+        k: _to_jsonable(v)
+        for k, v in record.__dict__.items()
+        if k not in _STANDARD_LOG_RECORD_ATTRIBUTES
+    }
+    return AgentRedactUtilities.standard_redact(extra) if extra else {}
+
+
 class _JsonFormatter(logging.Formatter):
-    """JSON log formatter that includes instance_id on every line."""
+    """
+    JSON log formatter for agent stdout. Emits one object per line with "ts" (UTC),
+    "level", "logger" and "msg", plus "instance_id" when configured, "mcd" holding
+    the redacted `extra=` attributes when the record carries any, and "exception"
+    when exc_info is set. Values that cannot be serialized are stringified.
+
+    Extras are always included here: stdout is read through the operator's own
+    log stack, and correlating a line with an operation is the point of having
+    them. Shipping them to the backend is a separate opt-in, see
+    in_process_logs_service.
+    """
+
+    # "ts" is rendered with a Z suffix, so it must be UTC regardless of host TZ.
+    converter = time.gmtime
 
     def __init__(self, instance_id: Optional[str] = None):
         super().__init__()
@@ -47,9 +105,13 @@ class _JsonFormatter(logging.Formatter):
         }
         if self._instance_id:
             log_entry["instance_id"] = self._instance_id
+        if extra := get_log_record_extra(record):
+            log_entry["mcd"] = extra
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_entry)
+        # default=str keeps a stray non-serializable extra value from taking the
+        # whole log line down with it.
+        return json.dumps(log_entry, default=str)
 
 
 def init_logging(
@@ -60,18 +122,19 @@ def init_logging(
     if json_format is None:
         json_format = os.environ.get("MCD_LOG_FORMAT", "text").lower() == "json"
     if json_format:
-        logging.root.handlers.clear()
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(_JsonFormatter(instance_id=instance_id))
-        logging.root.addHandler(handler)
-        logging.root.setLevel(level)
+        formatter: logging.Formatter = _JsonFormatter(instance_id=instance_id)
     else:
-        logging.basicConfig(
-            stream=sys.stdout,
-            level=level,
-            format="[%(asctime)s] %(levelname)s:%(name)s: %(message)s",
+        formatter = logging.Formatter(
+            fmt="[%(asctime)s] %(levelname)s:%(name)s: %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%SZ",
         )
+        # The Z suffix promises UTC; the default converter is localtime.
+        formatter.converter = time.gmtime
+    logging.root.handlers.clear()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+    logging.root.addHandler(handler)
+    logging.root.setLevel(level)
     logging.getLogger("snowflake.connector.cursor").setLevel(logging.WARNING)
 
 

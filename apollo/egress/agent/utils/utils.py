@@ -110,18 +110,19 @@ def init_logging(
     if json_format is None:
         json_format = os.environ.get("MCD_LOG_FORMAT", "text").lower() == "json"
     if json_format:
-        logging.root.handlers.clear()
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(_JsonFormatter(instance_id=instance_id))
-        logging.root.addHandler(handler)
-        logging.root.setLevel(level)
+        formatter: logging.Formatter = _JsonFormatter(instance_id=instance_id)
     else:
-        logging.basicConfig(
-            stream=sys.stdout,
-            level=level,
-            format="[%(asctime)s] %(levelname)s:%(name)s: %(message)s",
+        formatter = logging.Formatter(
+            fmt="[%(asctime)s] %(levelname)s:%(name)s: %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%SZ",
         )
+        # The Z suffix promises UTC; the default converter is localtime.
+        formatter.converter = time.gmtime
+    logging.root.handlers.clear()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+    logging.root.addHandler(handler)
+    logging.root.setLevel(level)
     logging.getLogger("snowflake.connector.cursor").setLevel(logging.WARNING)
 
 

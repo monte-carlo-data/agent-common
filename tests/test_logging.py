@@ -1,6 +1,8 @@
 import datetime
 import json
 import logging
+import os
+import time
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -211,6 +213,7 @@ class JsonFormatterTests(TestCase):
 
     def test_format_timestamp_is_utc(self):
         """`ts` carries a Z suffix, so it must be rendered in UTC, not local time."""
+        pin_non_utc_timezone(self)
         formatter = _JsonFormatter()
         record = logging.getLogger("test").makeRecord(
             "test", logging.INFO, "", 0, "msg", (), None
@@ -219,6 +222,34 @@ class JsonFormatterTests(TestCase):
         parsed = json.loads(formatter.format(record))
 
         self.assertEqual(parsed["ts"], "2025-09-08T22:10:00Z")
+
+    def test_format_ignores_attributes_set_by_other_formatters(self):
+        """Formatter.format() mutates the record (message, asctime). When another
+        handler formats first, those must not show up as extras."""
+        record = logging.getLogger("test").makeRecord(
+            "test", logging.INFO, "", 0, "msg", (), None, extra={"mine": 1}
+        )
+        logging.Formatter("%(asctime)s %(message)s").format(record)
+        parsed = json.loads(_JsonFormatter().format(record))
+
+        self.assertEqual(parsed["mcd"], {"mine": 1})
+
+
+def pin_non_utc_timezone(test: TestCase, tz: str = "America/New_York") -> None:
+    """Make local time differ from UTC for the duration of a test, so a formatter
+    that silently falls back to localtime fails in CI (which runs in UTC)."""
+    previous = os.environ.get("TZ")
+
+    def restore():
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+    os.environ["TZ"] = tz
+    time.tzset()
+    test.addCleanup(restore)
 
 
 class InitLoggingTests(TestCase):
@@ -243,6 +274,21 @@ class InitLoggingTests(TestCase):
 
         self.assertGreaterEqual(len(logging.root.handlers), 1)
         self.assertNotIsInstance(logging.root.handlers[0].formatter, _JsonFormatter)
+
+    def test_text_format_timestamp_is_utc(self):
+        """The text format also stamps a Z suffix, so it must render UTC too."""
+        pin_non_utc_timezone(self)
+        init_logging(json_format=False)
+        formatter = logging.root.handlers[0].formatter
+        assert formatter is not None
+        record = logging.getLogger("test.logger").makeRecord(
+            "test.logger", logging.INFO, "", 0, "msg", (), None
+        )
+        record.created = 1757369400  # 2025-09-08T22:10:00Z
+
+        self.assertEqual(
+            formatter.format(record), "[2025-09-08T22:10:00Z] INFO:test.logger: msg"
+        )
 
     @patch.dict("os.environ", {"MCD_LOG_FORMAT": "json"})
     def test_env_var_json(self):

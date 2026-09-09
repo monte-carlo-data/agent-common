@@ -34,8 +34,10 @@ def build_url(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
-# Attributes every LogRecord carries by default. Anything else on the record was
-# injected through `extra=` by the caller and is what we surface as "mcd".
+# Attributes every LogRecord carries by default. Anything on a record beyond these
+# was injected by the caller through `extra=`. "message" and "asctime" are not set
+# by the constructor but by Formatter.format(), which runs before this code
+# whenever another handler formats the record first.
 _STANDARD_LOG_RECORD_ATTRIBUTES = frozenset(
     logging.LogRecord("", logging.INFO, "", 0, "", (), None).__dict__
 ) | {"message", "asctime"}
@@ -75,7 +77,17 @@ def get_log_record_extra(record: logging.LogRecord) -> Dict[str, Any]:
 
 
 class _JsonFormatter(logging.Formatter):
-    """JSON log formatter that includes instance_id on every line."""
+    """
+    JSON log formatter for agent stdout. Emits one object per line with "ts" (UTC),
+    "level", "logger" and "msg", plus "instance_id" when configured, "mcd" holding
+    the redacted `extra=` attributes when the record carries any, and "exception"
+    when exc_info is set. Values that cannot be serialized are stringified.
+
+    Extras are always included here: stdout is read through the operator's own
+    log stack, and correlating a line with an operation is the point of having
+    them. Shipping them to the backend is a separate opt-in, see
+    in_process_logs_service.
+    """
 
     # "ts" is rendered with a Z suffix, so it must be UTC regardless of host TZ.
     converter = time.gmtime

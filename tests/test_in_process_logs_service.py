@@ -187,9 +187,8 @@ class InProcessLogShippingHandlerTests(TestCase):
         )
 
     def test_extra_attributes_cannot_clobber_reserved_keys(self):
-        # "timestamp"/"message" are the wire contract; agent_id/instance_id/
-        # log_type are stamped orchestrator-side and would be overwritten by
-        # the server's `**record` spread if we shipped them.
+        # See _RESERVED_RECORD_KEYS: ours would win the orchestrator's spread,
+        # and Datadog reserved names would retag the log.
         handler = InProcessLogShippingHandler(include_extra=True)
         record = logging.getLogger("test").makeRecord(
             "test",
@@ -204,7 +203,13 @@ class InProcessLogShippingHandlerTests(TestCase):
                 "agent_id": "spoofed",
                 "instance_id": "spoofed",
                 "log_type": "spoofed",
-                "mcd_trace_id": "trace-1",
+                "host": "spoofed",
+                "status": "spoofed",
+                "service": "spoofed",
+                "source": "spoofed",
+                "ddsource": "spoofed",
+                "ddtags": "spoofed",
+                "mcd_trace_id": "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c",
             },
         )
         handler.emit(record)
@@ -213,6 +218,9 @@ class InProcessLogShippingHandlerTests(TestCase):
             set(records[0].keys()), {"timestamp", "message", "mcd_trace_id"}
         )
         self.assertNotEqual(records[0]["timestamp"], "1970-01-01T00:00:00Z")
+        self.assertEqual(
+            records[0]["mcd_trace_id"], "3f8b1c2e-9a4d-4f1b-8c7a-1d2e3f4a5b6c"
+        )
 
     def test_shipped_extras_are_json_serializable(self):
         # BackendClient posts the drained batch with plain json.dumps; one
@@ -313,6 +321,8 @@ class SetupInProcessLogShippingTests(TestCase):
             self.assertEqual(len(root.handlers), len(before) + 1)
             new_handler = next(h for h in root.handlers if h not in before)
             self.assertIsInstance(new_handler, InProcessLogShippingHandler)
+            # Off by default: this signature is what consumers call.
+            self.assertFalse(new_handler.include_extra)
         finally:
             service.close()
         self.assertEqual(root.handlers, before)
@@ -323,6 +333,7 @@ class SetupInProcessLogShippingTests(TestCase):
         service = setup_in_process_log_shipping(include_extra=True)
         try:
             new_handler = next(h for h in root.handlers if h not in before)
+            self.assertIsInstance(new_handler, InProcessLogShippingHandler)
             self.assertTrue(new_handler.include_extra)
         finally:
             service.close()

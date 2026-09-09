@@ -15,8 +15,14 @@ BackendClient on every call) and stamped onto each record orchestrator-side.
 With `include_extra` enabled, attributes the caller logged via `extra=`
 (mcd_trace_id, mcd_operation_name, the redacted operation payload) are added
 as siblings of `message`, since the orchestrator spreads every non-message key
-into the Datadog log and DD facets need top-level attributes. Off by default:
-the operation payload on every log line multiplies backend log volume.
+into the Datadog log and DD facets need top-level attributes. The handler sits
+on the root logger, so this covers whatever any logger in the process attaches
+to a record, filtered only by `_RESERVED_RECORD_KEYS`.
+
+Off by default. Beyond backend log volume, the buffer is bounded by record
+count, not bytes: with extras on, each "Executing operation" record also holds
+the query text, so a long backend outage costs proportionally more agent memory
+and produces a larger recovery POST.
 """
 
 import itertools
@@ -33,10 +39,25 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BUFFER_SIZE = 10000
 DEFAULT_LEVEL = logging.INFO
-# Keys extras may never override: the wire contract plus the attributes the
-# orchestrator stamps onto each record before spreading ours over them.
+# Keys extras may never override. "timestamp" and "message" are the wire
+# contract of /api/v1/agent/logs; "agent_id", "instance_id" and "log_type" are
+# stamped onto each record by that endpoint's handler before it spreads ours
+# over them (keep in sync with it); the rest are Datadog reserved attributes
+# that would retag or misattribute the log if a third-party extra used them.
 _RESERVED_RECORD_KEYS = frozenset(
-    {"timestamp", "message", "agent_id", "instance_id", "log_type"}
+    {
+        "timestamp",
+        "message",
+        "agent_id",
+        "instance_id",
+        "log_type",
+        "host",
+        "status",
+        "service",
+        "source",
+        "ddsource",
+        "ddtags",
+    }
 )
 
 

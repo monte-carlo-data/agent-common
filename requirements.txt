@@ -4,7 +4,7 @@
 #
 #    pip-compile --strip-extras requirements.in
 #
-agent-base @ git+https://github.com/monte-carlo-data/agent-base.git@v0.0.6
+agent-base @ git+https://github.com/monte-carlo-data/agent-base.git@v0.0.7
     # via -r requirements.in
 boto3==1.35.87
     # via agent-base

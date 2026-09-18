@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Dict
 
+from apollo.common.agent.redact import is_sensitive_env_var_name
 from apollo.egress.agent.config.config_persistence import ConfigurationPersistence
 
 
@@ -17,14 +18,10 @@ class LocalConfig(ConfigurationPersistence):
         )
 
     def get_all_values(self) -> Dict[str, str]:
+        # Surfaced in the health endpoint, so credential-named vars are dropped.
         prefix = f"{self._prefix}_"
         return {
             key: value
             for key, value in os.environ.items()
-            if key.startswith(prefix) and not self._is_sensitive(key)
+            if key.startswith(prefix) and not is_sensitive_env_var_name(key)
         }
-
-    @staticmethod
-    def _is_sensitive(key: str):
-        key_lower = key.lower()
-        return "secret" in key_lower or "password" in key_lower

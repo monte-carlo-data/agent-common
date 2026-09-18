@@ -51,3 +51,51 @@ class LocalConfigTests(TestCase):
             values = self._config.get_all_values()
 
         self.assertEqual({"MCD_SAFE_SETTING": "visible"}, values)
+
+    def test_get_all_values_filters_credentials_not_named_secret_or_password(self):
+        # These all carry credential material but contain neither "secret" nor
+        # "password", so a predicate matching only those two leaks them into the
+        # health endpoint. MCD_STORAGE_CONNECTION_STRING is the worst case: the
+        # Azure connection string embeds AccountKey=..., which grants full
+        # data-plane access to the storage account.
+        with patch.dict(
+            "os.environ",
+            {
+                "MCD_SAFE_SETTING": "visible",
+                "MCD_STORAGE_CONNECTION_STRING": "AccountName=a;AccountKey=shh",
+                "MCD_STORAGE_ACCESS_KEY": "shh",
+                "MCD_API_TOKEN": "shh",
+                "MCD_SVC_CREDENTIAL": "shh",
+                "MCD_DB_PASSPHRASE": "shh",
+            },
+            clear=True,
+        ):
+            values = self._config.get_all_values()
+
+        self.assertEqual({"MCD_SAFE_SETTING": "visible"}, values)
+
+    def test_get_all_values_keeps_non_sensitive_lookalikes_visible(self):
+        # Over-redaction costs diagnostics, so the substrings must not be so broad
+        # that ordinary settings disappear. "connection_string" rather than
+        # "connection" is what keeps the timeout visible here.
+        with patch.dict(
+            "os.environ",
+            {
+                "MCD_DB_CONNECTION_TIMEOUT": "30",
+                "MCD_STORAGE": "AZURE_BLOB",
+                "MCD_STORAGE_BUCKET_NAME": "mcd",
+                "MCD_AGENT_WRAPPER_TYPE": "KUBERNETES",
+            },
+            clear=True,
+        ):
+            values = self._config.get_all_values()
+
+        self.assertEqual(
+            {
+                "MCD_DB_CONNECTION_TIMEOUT": "30",
+                "MCD_STORAGE": "AZURE_BLOB",
+                "MCD_STORAGE_BUCKET_NAME": "mcd",
+                "MCD_AGENT_WRAPPER_TYPE": "KUBERNETES",
+            },
+            values,
+        )
